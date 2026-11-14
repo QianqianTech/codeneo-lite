@@ -726,6 +726,18 @@ fn error(status: StatusCode, message: &str) -> Response<Body> {
     )
 }
 
+fn non_retryable_error(status: StatusCode, kind: &str, message: &str) -> Response<Body> {
+    let mut response = json_response(
+        status,
+        json!({"type": "error", "error": {"type": kind, "message": message}}),
+    );
+    response.headers_mut().insert(
+        "x-should-retry",
+        hyper::header::HeaderValue::from_static("false"),
+    );
+    response
+}
+
 struct RequestLog {
     id: u64,
     endpoint: &'static str,
@@ -775,15 +787,7 @@ impl RequestLog {
 
     fn reject_session(&self, code: &str, reason: &str) -> Response<Body> {
         self.record("warn", "会话路由", code, &format!("HTTP 403 · {reason}"));
-        let mut response = json_response(
-            StatusCode::FORBIDDEN,
-            json!({"type": "error", "error": {"type": "permission_error", "message": reason}}),
-        );
-        response.headers_mut().insert(
-            "x-should-retry",
-            hyper::header::HeaderValue::from_static("false"),
-        );
-        response
+        non_retryable_error(StatusCode::FORBIDDEN, "permission_error", reason)
     }
 }
 
@@ -1120,6 +1124,61 @@ async fn inference_payload(body: Incoming, log: &RequestLog) -> Result<Value, Re
     }
 }
 
+async fn read_kimi_concurrency_error(response: &mut reqwest::Response) -> Option<&'static str> {
+    const MAX_ERROR_BYTES: usize = 8 * 1024;
+    if !matches!(
+        response.status(),
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+    ) || !matches!(
+        response.url().path(),
+        "/coding/v1/messages" | "/coding/v1/messages/count_tokens"
+    ) || !crate::model_transport::is_kimi_code_endpoint(response.url())
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_ERROR_BYTES as u64)
+    {
+        return None;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if body.len() + chunk.len() > MAX_ERROR_BYTES {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        crate::model_transport::kimi_code_concurrency_message(&body)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn upstream_error(mut response: reqwest::Response, log: &RequestLog) -> Response<Body> {
+    let status = response.status();
+    if let Some(message) = read_kimi_concurrency_error(&mut response).await {
+        log.record(
+            "warn",
+            "上游响应",
+            "KIMI_UPSTREAM_CONCURRENCY_LIMIT",
+            &format!("Kimi Code 返回 HTTP {} · 并发请求受限", status.as_u16()),
+        );
+        return non_retryable_error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message);
+    }
+    log.record(
+        "error",
+        "上游响应",
+        "DESKTOP_UPSTREAM_HTTP_ERROR",
+        &format!("供应商返回 HTTP {}。", status.as_u16()),
+    );
+    let status = if status.is_redirection() {
+        StatusCode::BAD_GATEWAY
+    } else {
+        status
+    };
+    error(status, "第三方模型接口返回错误，请核对模型、权限和额度")
+}
+
 async fn forward_response(
     request: reqwest::RequestBuilder,
     wants_stream: bool,
@@ -1143,18 +1202,7 @@ async fn forward_response(
     };
     let status = response.status();
     if !status.is_success() {
-        log.record(
-            "error",
-            "上游响应",
-            "DESKTOP_UPSTREAM_HTTP_ERROR",
-            &format!("供应商返回 HTTP {}。", status.as_u16()),
-        );
-        let status = if status.is_redirection() {
-            StatusCode::BAD_GATEWAY
-        } else {
-            status
-        };
-        return error(status, "第三方模型接口返回错误，请核对模型、权限和额度");
+        return upstream_error(response, &log).await;
     }
     let upstream_type = response
         .headers()
@@ -1223,6 +1271,7 @@ async fn forward_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::ResponseBuilderExt;
     use tokio::sync::Notify;
 
     #[test]
@@ -1237,6 +1286,68 @@ mod tests {
         assert!(!sse.failed);
         sse.observe(b"or\n\n");
         assert!(sse.failed);
+    }
+
+    #[tokio::test]
+    async fn desktop_distinguishes_kimi_concurrency_from_permission_errors() {
+        let kimi = "https://api.kimi.com/coding/v1/messages";
+        let concurrency = "You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again.";
+        let permission = "Your current subscription does not have access to k3.1-pro.";
+        let request_log = RequestLog::new(&Method::POST, "/v1/messages");
+        for (url, upstream_status, message, rate_limited) in [
+            (kimi, StatusCode::FORBIDDEN, concurrency, true),
+            (kimi, StatusCode::TOO_MANY_REQUESTS, concurrency, true),
+            (
+                "https://api.kimi.com/coding/v1/messages/count_tokens",
+                StatusCode::FORBIDDEN,
+                concurrency,
+                true,
+            ),
+            (kimi, StatusCode::FORBIDDEN, permission, false),
+            (
+                "https://api.kimi.com/coding/v1/responses",
+                StatusCode::FORBIDDEN,
+                concurrency,
+                false,
+            ),
+            (
+                "https://custom.example/v1/messages",
+                StatusCode::FORBIDDEN,
+                concurrency,
+                false,
+            ),
+        ] {
+            let upstream = Response::builder()
+                .url(Url::parse(url).unwrap())
+                .status(upstream_status)
+                .body(
+                    json!({
+                        "type": "error",
+                        "error": {"type": "permission_error", "message": message},
+                        "details": "upstream-private-content"
+                    })
+                    .to_string(),
+                )
+                .unwrap()
+                .into();
+            let response = upstream_error(upstream, &request_log).await;
+            let (parts, body) = response.into_parts();
+            let text = body.collect().await.unwrap().to_bytes();
+            assert!(!std::str::from_utf8(&text)
+                .unwrap()
+                .contains("upstream-private-content"));
+            let body: Value = serde_json::from_slice(&text).unwrap();
+            if rate_limited {
+                assert_eq!(parts.status, StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(parts.headers["x-should-retry"], "false");
+                assert_eq!(body["error"]["type"], "rate_limit_error");
+                assert!(body["error"]["message"].as_str().unwrap().contains("并发"));
+            } else {
+                assert_eq!(parts.status, upstream_status);
+                assert!(!parts.headers.contains_key("x-should-retry"));
+                assert_eq!(body["error"]["type"], "api_error");
+            }
+        }
     }
 
     async fn upstream(

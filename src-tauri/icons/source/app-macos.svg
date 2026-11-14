@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffe871"/>
+      <stop offset="100%" stop-color="#ffc63c"/>
+    </linearGradient>
+  </defs>
+  <!-- Keep the artwork within the 824px macOS icon safe area. -->
+  <g transform="translate(100 100) scale(0.8046875)">
+    <image xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="codeneo-mark.png" width="1024" height="1024"/>
+    <rect x="466" y="696" width="518" height="244" rx="82" fill="#061120"/>
+    <rect x="483" y="713" width="484" height="210" rx="65" fill="url(#gold)"/>
+    <path fill="#111b2a" d="
+      M544 762h29v86h54v26h-83z
+      M649 762h29v112h-29z
+      M698 762h91v26h-31v86h-29v-86h-31z
+      M810 762h88v25h-59v18h52v24h-52v20h60v25h-89z"/>
+  </g>
+</svg>

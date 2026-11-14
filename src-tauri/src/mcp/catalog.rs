@@ -3,7 +3,7 @@ use super::{
     targets::{self, Scope},
     transports, Connection, Input, Transport,
 };
-use crate::{agents, launch, transaction::Client};
+use crate::{agents, files, launch, secrets, transaction::Client};
 use claudekeeper_claude::is_launchable_file;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -65,6 +65,8 @@ struct Variant {
     args: Vec<String>,
     #[serde(default)]
     options: BTreeMap<String, String>,
+    #[serde(default)]
+    builtin: Option<String>,
     input: Option<Prompt>,
     #[serde(default)]
     oauth: bool,
@@ -175,17 +177,146 @@ pub fn prepare(
     scope: Scope,
     id: &str,
     value: Option<&str>,
+    resources: &Path,
 ) -> Result<Input, String> {
     let variant = preset(id)?
         .variant(client)
         .ok_or("所选客户端不支持此 MCP 的连接方式")?;
     let mut input = build(client, scope, id, variant, value)?;
+    if let Some(builtin) = &variant.builtin {
+        let entry = builtin_entry(resources, builtin, &secrets::root()?)?;
+        input
+            .connection
+            .args
+            .insert(0, entry.to_str().ok_or("内置 MCP 路径编码无效")?.into());
+    }
     if variant.transport == Transport::Stdio {
         resolve_launcher(&mut input.connection, &agents::home()?, scope)?;
     }
     // Check the recipe with the same validation as a manual save.
     entry(client, &input.connection)?;
     Ok(input)
+}
+
+fn builtin_entry(resources: &Path, builtin: &str, data: &Path) -> Result<PathBuf, String> {
+    let name = match builtin {
+        "playwright" => "playwright",
+        _ => return Err("内置 MCP 目录条目无效".into()),
+    };
+    let source = resources.join("mcp/playwright/node_modules");
+    let entry = Path::new("@playwright/mcp/cli.js");
+    let runtime = data
+        .join("mcp")
+        .join(format!("{name}-{}", env!("CARGO_PKG_VERSION")));
+    files::private_dir(&runtime)?;
+    let installed = runtime.join("node_modules");
+    let installed_entry = installed.join(entry);
+    if installed_entry.is_file() {
+        return Ok(installed_entry);
+    }
+    if !source.join(entry).is_file() {
+        return Err("内置 Playwright MCP 文件缺失，请重新安装 Lite".into());
+    }
+
+    // AppImage resources are temporary mounts. Stage an offline copy beside the
+    // stable destination so saved client configs never reference that mount.
+    let staging = tempfile::Builder::new()
+        .prefix(".install-")
+        .tempdir_in(&runtime)
+        .map_err(|_| "无法暂存内置 Playwright MCP")?;
+    let staged = staging.path().join("node_modules");
+    copy_builtin(&source, &staged)?;
+    if let Err(error) = std::fs::rename(&staged, &installed) {
+        if !installed_entry.is_file() {
+            return Err(match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "内置 Playwright MCP 的安装目录无效，请重新安装 Lite".into()
+                }
+                _ => "无法准备内置 Playwright MCP".into(),
+            });
+        }
+    }
+    Ok(installed_entry)
+}
+
+fn copy_builtin(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir(destination).map_err(|_| "无法创建内置 MCP 安装目录")?;
+    for entry in std::fs::read_dir(source).map_err(|_| "无法读取内置 MCP 资源")? {
+        let entry = entry.map_err(|_| "无法读取内置 MCP 资源")?;
+        let name = entry.file_name();
+        if name == ".bin" {
+            continue;
+        }
+        let kind = entry
+            .file_type()
+            .map_err(|_| "无法检查内置 MCP 资源")?;
+        let target = destination.join(name);
+        if kind.is_dir() {
+            copy_builtin(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target).map_err(|_| "无法复制内置 MCP 资源")?;
+        } else {
+            return Err("内置 MCP 资源包含不支持的链接".into());
+        }
+    }
+    Ok(())
+}
+
+pub fn legacy_playwright_migration(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    server: &serde_json::Value,
+    resources: &Path,
+) -> Result<Option<Input>, String> {
+    if name != "playwright" {
+        return Ok(None);
+    }
+    let before = super::connection(client, server)?;
+    let Some(args) = legacy_playwright_args(&before) else {
+        return Ok(None);
+    };
+
+    let mut input = prepare(client, scope, name, None, resources)?;
+    let entry = input.connection.args.remove(0);
+    input.connection.args = std::iter::once(entry).chain(args).collect();
+    input.connection.options = before.options;
+    Ok(Some(input))
+}
+
+fn legacy_playwright_args(connection: &Connection) -> Option<Vec<String>> {
+    if connection.transport != Transport::Stdio {
+        return None;
+    }
+    let launcher = Path::new(&connection.endpoint)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let mut args = connection.args.clone();
+    let npm_script = args.first().is_some_and(|arg| {
+        Path::new(arg)
+            .file_name()
+            .is_some_and(|name| name == "npx-cli.js")
+    });
+    if !launcher.eq_ignore_ascii_case("npx") && !npm_script {
+        return None;
+    }
+    if npm_script {
+        args.remove(0);
+    }
+    if args.first().is_some_and(|arg| arg == "-y") {
+        args.remove(0);
+    }
+    let package = args.first().map(String::as_str).unwrap_or_default();
+    if package != "@playwright/mcp"
+        && !package
+            .strip_prefix("@playwright/mcp@")
+            .is_some_and(|version| !version.is_empty())
+    {
+        return None;
+    }
+    args.remove(0);
+    Some(args)
 }
 
 fn resolve_launcher(connection: &mut Connection, home: &Path, scope: Scope) -> Result<(), String> {
@@ -404,6 +535,67 @@ mod tests {
         std::fs::write(&script, "fixture").unwrap();
         std::fs::write(&shim, "fixture").unwrap();
         assert_eq!(npx_script(&shim, &node), Some(script));
+    }
+
+    #[test]
+    fn bundled_playwright_entry_is_copied_to_a_stable_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let resources = dir.path().join("resources");
+        let data = dir.path().join("data");
+        let relative = "mcp/playwright/node_modules/@playwright/mcp/cli.js";
+        let source = resources.join(relative);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "// fixture").unwrap();
+
+        let installed = builtin_entry(&resources, "playwright", &data).unwrap();
+        assert!(installed.starts_with(&data));
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "// fixture");
+
+        std::fs::remove_file(source).unwrap();
+        assert_eq!(
+            builtin_entry(&resources, "playwright", &data).unwrap(),
+            installed
+        );
+
+        let missing = tempfile::tempdir().unwrap();
+        let error = builtin_entry(missing.path(), "playwright", &data.join("missing"))
+            .unwrap_err();
+        assert!(error.contains("文件缺失"));
+    }
+
+    #[test]
+    fn legacy_playwright_launchers_are_detected_without_touching_custom_servers() {
+        let connection = |endpoint: &str, args: &[&str]| Connection {
+            transport: Transport::Stdio,
+            endpoint: endpoint.into(),
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+            options: BTreeMap::new(),
+        };
+        let npx = connection(
+            "/usr/local/bin/npx",
+            &["-y", "@playwright/mcp@latest", "--isolated"],
+        );
+        assert_eq!(legacy_playwright_args(&npx), Some(vec!["--isolated".into()]));
+
+        let npm_script = connection(
+            "/usr/local/bin/node",
+            &[
+                "/usr/local/lib/node_modules/npm/bin/npx-cli.js",
+                "-y",
+                "@playwright/mcp@0.0.36",
+                "--headless",
+            ],
+        );
+        assert_eq!(
+            legacy_playwright_args(&npm_script),
+            Some(vec!["--headless".into()])
+        );
+
+        let custom = connection(
+            "/usr/local/bin/node",
+            &["/custom/server.js", "@playwright/mcp@latest"],
+        );
+        assert_eq!(legacy_playwright_args(&custom), None);
     }
 
     #[test]

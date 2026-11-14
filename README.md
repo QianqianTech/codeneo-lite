@@ -9,6 +9,8 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 这是公开预览版。Windows 安装程序未签名，macOS 版已签名，Apple 公证尚未完成。首次打开可能遇到系统提示。 [发布说明与 SHA-256 校验](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.1)
 
+各版本的改动见 [更新日志](CHANGELOG.md)。
+
 ## 启动客户端
 
 在「客户端」选择应用，再点卡片上的启动按钮。托盘菜单也可以快速打开客户端。
@@ -62,6 +64,8 @@ OpenCode、Qwen Code、CodeBuddy Code、Kimi Code 和 Copilot CLI 通过各自�
 Claude Code、Codex、Qwen Code、CodeBuddy Code 和 Kimi Code 可以选择项目共享配置；Claude Code 还支持只在本机当前项目生效的配置。快捷配置在项目共享范围使用环境变量引用 Key。客户端的信任和授权仍在客户端内处理。
 
 「已配置」可以编辑、验证、移除服务或撤销当前配置范围的最近一次变更。保存只写入配置；主动点「验证连接」时，Lite 会发起 MCP 握手并尝试读取工具列表。OAuth 登录或依赖客户端会话的连接，请在目标客户端中验证。
+
+Playwright 的 MCP 服务及 npm 依赖已随 Lite 打包，快速配置会直接使用内置服务，不再通过 `npx` 下载。验证旧版 Playwright 配置时，Lite 会先将已知的 `npx` 启动方式迁移到内置入口，并保留启动参数、环境变量和高级设置。本机仍需 Node.js 18+ 和可用的浏览器。
 
 Claude Code、Qwen Code、CodeBuddy Code 和 Copilot CLI 的启停入口在原客户端。WorkBuddy 添加工具后需要在客户端中信任该连接器。
 

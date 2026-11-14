@@ -250,12 +250,18 @@ async fn get_mcp(
 
 #[tauri::command]
 async fn verify_mcp(
+    app: tauri::AppHandle,
     client: Client,
     destination: mcp::Destination,
     target: mcp::Verification,
 ) -> Result<mcp::Check, String> {
-    let (server, location) =
-        work(move || mcp::verification_entry(client, destination, target)).await?;
+    let resources = mcp_resources(&app)?;
+    let (server, location) = work(move || {
+        let root = secrets::root()?;
+        mcp::migrate_legacy_playwright(&root, client, &destination, &target, &resources)?;
+        mcp::verification_entry(client, destination, target)
+    })
+    .await?;
     mcp::check(client, server, location.directory.as_deref()).await
 }
 
@@ -302,14 +308,33 @@ fn open_mcp_source(id: String) -> Result<(), String> {
     open_url(mcp::catalog::source(&id)?)
 }
 
+fn mcp_resources(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        return Ok(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        app.path()
+            .resource_dir()
+            .map_err(|_| "无法定位内置 MCP 资源".into())
+    }
+}
+
 #[tauri::command]
 async fn prepare_mcp_preset(
+    app: tauri::AppHandle,
     client: Client,
     scope: mcp::Scope,
     id: String,
     value: Option<String>,
 ) -> Result<mcp::Input, String> {
-    work(move || mcp::catalog::prepare(client, scope, &id, value.as_deref())).await
+    let resources = mcp_resources(&app)?;
+    work(move || {
+        mcp::catalog::prepare(client, scope, &id, value.as_deref(), &resources)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -494,6 +519,11 @@ fn main() {
         .manage(tokio::sync::Mutex::new(()))
         .manage(usage::UsageCache::default())
         .setup(|app| {
+            if let Ok(root) = secrets::root() {
+                if files::private_dir(&root).is_ok() {
+                    claudekeeper_app::diagnostics::initialize(root);
+                }
+            }
             let _ = tray::install(app);
             start_pending_check(app.handle().clone());
             tauri::async_runtime::spawn(async {

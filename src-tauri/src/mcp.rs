@@ -488,6 +488,39 @@ fn update_connection_fields(
     }
 }
 
+pub fn migrate_legacy_playwright(
+    root: &Path,
+    client: Client,
+    destination: &Destination,
+    target: &Verification,
+    resources: &Path,
+) -> Result<(), String> {
+    let Verification::Saved { name } = target else {
+        return Ok(());
+    };
+    if name != "playwright" {
+        return Ok(());
+    }
+    agents::ensure_compatible(client)?;
+    let _lock = files::lock(root)?;
+    let location = destination.resolve(client)?;
+    let section = location.sections();
+    let plan = open(client, &location.path)?;
+    let server = configured(&plan, &section, name)?.clone();
+    let Some(mut input) =
+        catalog::legacy_playwright_migration(client, location.scope, name, &server, resources)?
+    else {
+        return Ok(());
+    };
+    input.revision = Some(revision(&location.path, &server));
+    input.advanced = options::read(client, input.connection.transport, &server)
+        .into_iter()
+        .map(|(key, value)| (key, Some(value)))
+        .collect();
+    let plan = save_at(plan, &location.path, &section, client, &input)?;
+    commit(root, client, &location, plan)
+}
+
 pub fn verification_entry(
     client: Client,
     destination: Destination,

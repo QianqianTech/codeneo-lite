@@ -96,6 +96,22 @@ pub fn provider_api_model(raw: &str) -> Result<String, String> {
     Ok(model.strip_suffix("[1m]").unwrap_or(model).to_string())
 }
 
+pub fn is_kimi_code_endpoint(url: &Url) -> bool {
+    url.scheme() == "https"
+        && matches!(url.host_str(), Some("api.kimi.com" | "api.kimi.ai"))
+        && (url.path() == "/coding" || url.path().starts_with("/coding/"))
+}
+
+pub fn kimi_code_concurrency_message(body: &[u8]) -> Option<&'static str> {
+    let error: Value = serde_json::from_slice(body).ok()?;
+    error
+        .pointer("/error/message")?
+        .as_str()?
+        .trim_start()
+        .starts_with("You've reached your concurrent request limit")
+        .then_some("Kimi Code 返回并发请求限制，请稍后手动重试")
+}
+
 fn http_error(status: u16) -> String {
     let text = match status {
         301..=399 => "接口返回重定向，为保护密钥没有继续跳转，请核对接口地址",
@@ -174,6 +190,12 @@ pub async fn verify_provider_model<T: ProviderTransport + Sync>(transport: &T, b
     let start = Instant::now();
     let result = match transport.request(endpoint.as_str(), header, Some(body)).await {
         Err(err) => Err(err),
+        Ok(reply) if matches!(reply.status, 403 | 429) && is_kimi_code_endpoint(base) => {
+            let message = kimi_code_concurrency_message(&reply.body)
+                .map(|message| format!("{message}（上游 HTTP {}）", reply.status))
+                .unwrap_or_else(|| http_error(reply.status));
+            Err(message)
+        }
         Ok(reply) if !(200..300).contains(&reply.status) => Err(http_error(reply.status)),
         Ok(reply) => {
             let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
@@ -285,6 +307,24 @@ mod tests {
             let result = verify_provider_model(&stub(vec![(status,body)]),&provider_base("https://gateway.example").unwrap(),("x-api-key","secret"),"a").await.unwrap(); assert!(!result.healthy);
         }
     }
+
+    #[tokio::test]
+    async fn kimi_model_verification_explains_concurrency_rejection() {
+        let message = "You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again.";
+        let client = stub(vec![(403, json!({"error": {"type": "permission_error", "message": message}}))]);
+        let result = verify_provider_model(
+            &client,
+            &provider_base("https://api.kimi.com/coding").unwrap(),
+            ("x-api-key", "fixture-key"),
+            "k3.1-pro",
+        )
+        .await
+        .unwrap();
+        assert!(!result.healthy);
+        assert_eq!(result.message, "Kimi Code 返回并发请求限制，请稍后手动重试（上游 HTTP 403）");
+        assert_eq!(client.calls.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn thinking_only_models_keep_their_required_protocol() {
         let client = stub(vec![(200,json!({"type":"message","role":"assistant","model":"kimi-k2.7-code","content":[{"type":"thinking","thinking":"response"}]}))]);

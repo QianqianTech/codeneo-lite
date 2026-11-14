@@ -1,9 +1,10 @@
 {
   "name": "codeneo-lite",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "MIT",
   "scripts": {
+    "postinstall": "npm --prefix mcp/playwright install --omit=dev --package-lock=false --ignore-scripts --no-audit --no-fund",
     "dev": "tauri dev",
     "build": "tauri build",
     "test:ui": "node tests/management-ui.cjs && node tests/setup-ui.cjs"

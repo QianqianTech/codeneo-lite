@@ -96,10 +96,11 @@
       "variants": [
         {
           "transport": "stdio",
-          "endpoint": "npx",
-          "args": ["-y", "@playwright/mcp@latest", "--isolated"],
-          "requires": "Node.js 18+（npx）",
-          "note": "使用独立浏览器会话。按客户端提示准备浏览器。"
+          "endpoint": "node",
+          "args": ["--isolated"],
+          "builtin": "playwright",
+          "requires": "Node.js 18+（Lite 已内置 MCP 服务）",
+          "note": "使用独立浏览器会话，无需下载 MCP 服务。按客户端提示准备浏览器。"
         }
       ]
     },

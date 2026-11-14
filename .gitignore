@@ -2,6 +2,7 @@
 /src-tauri/target/
 /src-tauri/gen/
 /node_modules/
+/mcp/playwright/node_modules/
 /dist/
 /data/_logs/
 .DS_Store
