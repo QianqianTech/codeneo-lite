@@ -1,0 +1,6 @@
+{
+  "identifier": "lite-window",
+  "description": "codeneo-lite 设置窗口事件",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

@@ -1,0 +1,11 @@
+[package]
+name = "claudekeeper-app"
+version = "0.1.16"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+claudekeeper-net = { path = "../net" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

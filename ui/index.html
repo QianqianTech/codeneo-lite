@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeNeo Lite</title>
+  <script src="window.js"></script>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+  <script src="models.js" defer></script>
+  <script src="mcp.js" defer></script>
+  <script src="frameleap.js" defer></script>
+  <script src="usage.js" defer></script>
+</head>
+<body>
+  <div class="window-drag-region" data-tauri-drag-region aria-hidden="true"></div>
+  <div class="workspace">
+    <nav class="main-nav" aria-label="主导航">
+      <button type="button" data-page="clients" title="客户端" aria-current="page"><span class="icon icon-clients" aria-hidden="true"></span><span class="nav-label">客户端</span></button>
+      <button type="button" data-page="models" title="模型库"><span class="icon icon-models" aria-hidden="true"></span><span class="nav-label">模型库</span></button>
+      <button type="button" data-page="tools" title="MCP 工具"><span class="icon icon-tools" aria-hidden="true"></span><span class="nav-label">MCP 工具</span></button>
+      <button type="button" data-page="usage" title="用量"><span class="icon icon-usage" aria-hidden="true"></span><span class="nav-label">用量</span></button>
+    </nav>
+
+    <main>
+      <p id="workspace-error" class="feedback" role="status" hidden></p>
+      <section class="page clients-page" data-view="clients" aria-labelledby="clients-title">
+        <div class="client-layout">
+          <aside class="client-sidebar" aria-labelledby="clients-title">
+            <header class="client-sidebar-header">
+              <span class="brand">CodeNeo Lite</span>
+              <div class="sidebar-tools">
+                <span class="gateway-indicator" id="gateway-indicator" role="img" data-ready="false" aria-label="网关未就绪" title="网关未就绪"></span>
+                <button type="button" class="icon-button" id="toggle-client-search" title="搜索客户端" aria-label="搜索客户端" aria-expanded="false" aria-controls="client-search-field"><span class="icon icon-search" aria-hidden="true"></span></button>
+              </div>
+            </header>
+            <label class="search" id="client-search-field" hidden><span class="sr-only">搜索客户端</span><input id="client-search" type="search" placeholder="搜索客户端"></label>
+            <h1 id="clients-title" tabindex="-1">客户端</h1>
+            <div id="client-list" class="client-list"><p class="muted">正在读取本机配置…</p></div>
+          </aside>
+          <div class="client-detail">
+            <header class="page-header client-header">
+              <div class="current-identity" id="client-identity" hidden>
+                <h2 class="page-title" id="current-client"></h2>
+                <span class="status" id="client-status"></span>
+              </div>
+              <button type="button" class="icon-button" id="refresh-clients" title="刷新状态" aria-label="刷新状态"><span class="icon icon-refresh" aria-hidden="true"></span></button>
+            </header>
+            <div id="client-detail" hidden>
+              <section aria-labelledby="current-client">
+                <div class="button-row client-launch" id="client-launch" hidden>
+                  <button type="button" id="open-client" hidden>打开客户端</button>
+                  <button type="button" id="restart-client" hidden>重启客户端</button>
+                  <button type="button" id="terminal-client" hidden>在终端启动</button>
+                </div>
+                <dl class="current-values">
+                  <div><dt id="current-model-label">当前模型</dt><dd id="current-model"></dd></div>
+                  <div><dt id="current-account-label">接入来源</dt><dd id="current-account"></dd></div>
+                </dl>
+                <div id="current-models" class="current-models" hidden></div>
+                <p class="muted switch-note" id="gateway-status" hidden></p>
+                <p id="launch-note" hidden></p>
+              </section>
+              <p class="feedback" id="launch-feedback" role="status" hidden></p>
+              <p class="feedback" id="client-issue" role="status" hidden></p>
+              <section class="client-config" aria-labelledby="switch-title">
+                <div class="section-heading">
+                  <div><h3 id="switch-title">更换模型</h3><p id="client-protocol" class="muted"></p></div>
+                  <button type="button" class="text-button" id="client-mcp">管理 MCP <span aria-hidden="true">↗</span></button>
+                </div>
+                <div id="model-switch" hidden>
+                  <div class="fields switch-fields">
+                    <div class="field" id="client-mode-field"><label for="client-mode">运行模式</label><select id="client-mode" aria-describedby="client-mode-note"><option value="official">官方模式</option><option value="third_party">第三方模型</option></select></div>
+                    <div class="field" id="client-profile-field"><label id="client-profile-label" for="client-model-picker">第三方档案</label><select id="client-model-picker"></select></div>
+                    <div class="field" id="client-connection-field" hidden><label for="client-connection">连接方式</label><select id="client-connection"><option value="direct">直连兼容接口</option><option value="gateway">CodeNeo Lite网关</option></select></div>
+                  </div>
+                  <p class="muted switch-note" id="client-mode-note" hidden></p>
+                  <div class="button-row switch-actions">
+                    <button type="button" class="primary" id="apply-model">应用模式</button>
+                    <button type="button" class="primary" id="apply-client-launch" hidden>应用并重启</button>
+                    <button type="button" class="secondary" id="pull-client-models" hidden>拉取模型</button>
+                    <button type="button" class="secondary" id="verify-client-model" hidden>验证供应商</button>
+                    <button type="button" class="text-button" id="edit-client-model" hidden>配置可选模型</button>
+                  </div>
+                  <div id="client-catalog" class="switch-catalog" hidden>
+                    <div class="field"><label id="client-catalog-title" for="client-catalog-model">供应商模型目录</label><select id="client-catalog-model"></select></div>
+                    <button type="button" class="secondary" id="configure-catalog-model">配置所选模型</button>
+                  </div>
+                </div>
+                <div class="agent-models" id="agent-models" hidden>
+                  <p class="muted" id="agent-model-guide">选择要添加的模型，再指定默认模型。每个客户端的选择独立保存。</p>
+                  <div id="agent-model-choices" class="agent-model-choices"></div>
+                  <button type="button" class="primary" id="save-agent-models">应用模型列表</button>
+                </div>
+                <p id="client-empty-text" class="muted"></p>
+                <button type="button" id="client-add-model">配置新模型 <span aria-hidden="true">→</span></button>
+                <div class="pending" id="client-pending" hidden><p id="pending-text"></p><button type="button" class="secondary" id="cancel-switch">取消等待</button></div>
+                <p class="feedback" id="client-feedback" role="status" hidden></p>
+                <p class="client-note muted" id="client-note"></p>
+                <button type="button" class="secondary" id="agent-help" hidden>打开官方配置指南 <span aria-hidden="true">↗</span></button>
+                <button type="button" class="secondary" id="client-after-apply" hidden></button>
+                <details id="client-recovery">
+                  <summary>恢复与撤销</summary>
+                  <div class="button-row">
+                    <button type="button" class="secondary" id="restore-model"></button>
+                    <button type="button" class="secondary" id="undo-model">撤销上次配置</button>
+                    <button type="button" class="secondary" id="recover-desktop-session" hidden>接续旧会话</button>
+                  </div>
+                </details>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page models-page" data-view="models" aria-labelledby="models-title" hidden>
+        <header class="page-header">
+          <h1 id="models-title" tabindex="-1">模型库</h1>
+          <div class="button-row" id="model-header-actions">
+            <button type="button" class="secondary" id="open-model-switch">模型切换</button>
+            <button type="button" class="primary" id="new-model"><span aria-hidden="true">＋</span> 添加模型</button>
+          </div>
+        </header>
+        <section id="model-library" aria-label="浏览模型库">
+          <div class="library-toolbar">
+            <div class="view-tabs" role="group" aria-label="模型库视图">
+              <button type="button" data-model-tab="catalog" aria-pressed="true">模型目录</button>
+              <button type="button" data-model-tab="saved" aria-pressed="false">已配置 <span id="saved-count">0</span></button>
+            </div>
+            <label class="search"><span class="sr-only">搜索模型</span><input id="model-search" type="search" placeholder="搜索模型 ID 或服务商"></label>
+            <label class="library-select"><span class="sr-only">筛选客户端</span><select id="library-client"><option value="">所有客户端</option></select></label>
+            <label class="library-select library-provider-field" id="library-provider-field" hidden><span class="sr-only">筛选服务商</span><select id="library-provider"></select></label>
+          </div>
+          <div class="library-body">
+            <aside class="provider-index" id="library-provider-index" aria-labelledby="provider-index-title" hidden>
+              <h2 id="provider-index-title">服务商</h2>
+              <div class="provider-options" id="library-providers" role="group" aria-labelledby="provider-index-title"></div>
+            </aside>
+            <div class="library-results">
+              <div class="library-summary">
+                <p id="library-summary" role="status">正在读取模型库…</p>
+                <button type="button" class="text-button" id="clear-library-filters" hidden>清除筛选</button>
+              </div>
+              <p class="feedback" id="models-feedback" role="status" hidden></p>
+              <div id="model-list" class="model-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <form class="model-editor" id="model-form" autocomplete="off" novalidate hidden>
+          <div class="section-heading editor-heading">
+            <div><h2 id="form-title">添加模型</h2><p id="editor-target" class="muted"></p><code id="editor-picked" hidden></code></div>
+            <button class="secondary" type="button" id="close-model">返回模型库</button>
+          </div>
+          <ol class="setup-steps" aria-label="模型配置步骤">
+            <li data-step="connection" aria-current="step">接入服务</li>
+            <li data-step="selection">选择模型</li>
+          </ol>
+          <section id="connection-step" aria-label="接入服务">
+            <label class="field" id="provider-field">服务商<select id="provider-picker"></select></label>
+            <label class="field" id="account-field">接入账号<select id="account-picker"></select></label>
+            <div id="connection-details" class="fields" hidden>
+              <label class="field">接口地址（Base URL）<input id="provider-url" spellcheck="false" placeholder="https://api.example.com/v1"></label>
+              <label class="field" id="protocol-field">接口协议<select id="provider-protocol">
+                <option value="anthropic">Anthropic Messages</option>
+                <option value="responses">OpenAI Responses</option>
+                <option value="chat_completions">Chat Completions</option>
+              </select></label>
+              <label class="field" id="auth-field">认证方式<select id="provider-auth"><option value="auth_token">Bearer</option><option value="api_key">x-api-key</option></select></label>
+            </div>
+            <label class="field" for="provider-key">模型 API Key
+              <input id="provider-key" type="password" maxlength="4096" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="provider-key-help" placeholder="粘贴从服务商获取的 Key">
+            </label>
+            <p class="muted field-help" id="provider-key-help"></p>
+            <details id="account-options">
+              <summary>接入名称（可选）</summary>
+              <label class="field" for="account-name">接入名称<input id="account-name" maxlength="96" placeholder="例如：工作账号"></label>
+            </details>
+          </section>
+
+          <section id="selection-step" aria-label="选择模型" hidden>
+            <div class="section-heading catalog-heading">
+              <div><h3>服务商模型列表</h3><p id="catalog-source" class="muted"></p></div>
+              <button type="button" class="secondary" id="refresh-catalog">重新加载</button>
+            </div>
+            <label class="search"><span class="sr-only">搜索可选模型</span><input type="search" id="candidate-search" placeholder="按名称或模型 ID 搜索"></label>
+            <div class="candidate-list" id="candidate-list" role="group" aria-label="可选模型"></div>
+            <details id="selected-models" hidden>
+              <summary id="selected-count"></summary>
+              <ul class="selected-model-list" id="selected-model-list"></ul>
+            </details>
+            <div class="fields selection-fields">
+              <label class="field" for="model-id"><span id="model-id-label">模型 ID</span><input id="model-id" maxlength="256" spellcheck="false" placeholder="从上面选择，或粘贴模型 ID"></label>
+              <label class="field" for="model-name">显示名称（可选）<input id="model-name" maxlength="96" placeholder="默认使用模型名称"></label>
+            </div>
+            <details class="model-options" id="desktop-model-options" hidden>
+              <summary>Claude Desktop 可选模型</summary>
+              <p class="muted field-help" id="desktop-model-help">每行一个模型 ID，首行是默认模型。通过 CodeNeo Lite网关应用后，可在 Claude Desktop 的模型菜单中切换。</p>
+              <label class="field" for="desktop-model-list">Desktop 模型列表<textarea id="desktop-model-list" rows="4" spellcheck="false" aria-describedby="desktop-model-help" placeholder="qwen3.8-max&#10;qwen3.8-flash"></textarea></label>
+              <button type="button" class="secondary" id="add-desktop-candidate" hidden>将所选模型加入 Desktop 列表</button>
+            </details>
+            <details class="model-options" id="code-model-options" hidden>
+              <summary>Claude Code 模型映射</summary>
+              <p class="muted field-help">为各角色填入同一账号的模型 ID。留空时使用默认设置。</p>
+              <div class="fields" id="code-model-fields"></div>
+              <datalist id="code-model-catalog"></datalist>
+            </details>
+          </section>
+          <div class="editor-footer">
+            <p class="feedback" id="editor-feedback" role="status" hidden></p>
+            <div class="button-row" id="connection-actions">
+              <button type="button" class="primary" id="fetch-models">加载模型列表 <span aria-hidden="true">→</span></button>
+              <button type="button" class="text-button" id="skip-catalog">手动选择模型</button>
+            </div>
+            <div class="button-row" id="selection-actions" hidden>
+              <button type="button" class="text-button" id="back-to-connection">← 上一步</button>
+              <div class="spacer"></div>
+              <button type="button" class="secondary" id="probe-model">测试连接</button>
+              <button type="submit" class="primary" id="save-model">保存模型</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section class="page" data-view="tools" aria-labelledby="tools-title" hidden>
+        <header class="page-header">
+          <h1 id="tools-title" tabindex="-1">MCP 工具</h1>
+          <div class="button-row">
+            <button type="button" class="secondary" id="import-mcp">粘贴配置</button>
+            <button type="button" class="primary" id="new-mcp"><span aria-hidden="true">＋</span> 添加 MCP</button>
+          </div>
+        </header>
+        <div class="mcp-destination">
+          <div class="tools-toolbar">
+            <label class="field">目标客户端<select id="mcp-client"></select></label>
+            <label class="field" id="mcp-scope-field" hidden>配置范围<select id="mcp-scope"></select></label>
+            <div class="spacer"></div>
+            <button type="button" class="secondary" id="refresh-mcp"><span aria-hidden="true">↻</span> 刷新列表</button>
+          </div>
+          <div id="mcp-project" class="mcp-project" hidden>
+            <button type="button" class="secondary" id="pick-mcp-project">选择项目目录</button>
+            <span class="muted" id="mcp-project-path"></span>
+          </div>
+          <p id="mcp-scope-note" class="muted" hidden></p>
+          <details id="mcp-location" hidden>
+            <summary id="mcp-location-label">配置文件</summary>
+            <code id="mcp-location-path"></code>
+          </details>
+          <p class="feedback" id="mcp-target-feedback" role="status" hidden></p>
+        </div>
+        <form id="mcp-import" class="mcp-editor" autocomplete="off" hidden>
+          <div class="section-heading"><div><h2>粘贴 MCP 配置</h2><p class="muted">一次粘贴一个服务，支持 JSON、JSONC 和 Codex TOML。</p></div><button class="secondary" type="button" id="close-mcp-import">取消</button></div>
+          <label class="field">配置片段<textarea id="mcp-import-text" rows="6" maxlength="1048576" spellcheck="false" required placeholder='{"mcpServers":{"example":{"url":"https://example.com/mcp"}}}'></textarea></label>
+          <div class="button-row form-actions"><button class="primary" type="submit">读取配置</button></div>
+          <p class="feedback" id="mcp-import-feedback" role="status" hidden></p>
+        </form>
+        <form id="mcp-quick" class="mcp-editor" autocomplete="off" hidden>
+          <div class="section-heading"><div><h2 id="mcp-quick-title" tabindex="-1"></h2><p id="mcp-quick-target" class="muted"></p></div><button class="secondary" type="button" id="close-mcp-quick">取消</button></div>
+          <p id="mcp-quick-note" class="muted"></p>
+          <p id="mcp-quick-target-value" class="mcp-quick-endpoint"></p>
+          <div id="mcp-quick-field" hidden>
+            <label class="field"><span id="mcp-quick-label"></span><input id="mcp-quick-value" type="password" maxlength="8192" spellcheck="false"></label>
+            <button class="secondary" type="button" id="pick-mcp-input" hidden>选择文件夹</button>
+          </div>
+          <div class="button-row form-actions">
+            <button class="text-button" type="button" id="edit-mcp-quick">调整连接参数</button>
+            <button class="primary" type="submit" id="save-mcp-quick">保存到客户端</button>
+          </div>
+          <p class="feedback" id="mcp-quick-feedback" role="status" hidden></p>
+        </form>
+        <form class="mcp-editor" id="mcp-editor" autocomplete="off" hidden>
+          <div class="section-heading"><div><h2 id="mcp-form-title">添加 MCP 服务</h2><p class="muted" id="mcp-form-target"></p></div><button class="secondary" type="button" id="close-mcp">取消</button></div>
+          <p class="feedback" id="mcp-import-result" hidden></p>
+          <div class="fields">
+            <label class="field">服务名称<input id="mcp-name" placeholder="例如：docs-search" maxlength="128" spellcheck="false" required></label>
+            <label class="field">连接方式<select id="mcp-transport"></select></label>
+          </div>
+          <label class="field"><span id="mcp-endpoint-label">服务地址</span><input id="mcp-endpoint" maxlength="8192" spellcheck="false" required></label>
+          <fieldset id="mcp-args-field" class="mcp-parameters" hidden>
+            <legend>启动参数</legend>
+            <div id="mcp-args" class="mcp-fields"></div>
+            <button class="secondary" type="button" id="add-mcp-arg">＋ 添加参数</button>
+          </fieldset>
+          <details id="mcp-advanced">
+            <summary id="mcp-options-title">自定义请求头</summary>
+            <div id="mcp-options" class="mcp-fields"></div>
+            <button class="secondary" type="button" id="add-mcp-option">＋ 添加请求头</button>
+          </details>
+          <details id="mcp-native" hidden>
+            <summary id="mcp-native-title">客户端高级设置</summary>
+            <div id="mcp-native-fields" class="fields"></div>
+          </details>
+          <div class="button-row form-actions">
+            <button class="secondary" type="button" id="verify-mcp">验证连接</button>
+            <button class="primary" type="submit" id="save-mcp">保存 MCP</button>
+          </div>
+          <p class="feedback" id="mcp-editor-feedback" role="status" hidden></p>
+        </form>
+
+        <div class="tools-toolbar mcp-browser">
+          <div class="view-tabs" role="group" aria-label="MCP 工具视图">
+            <button type="button" id="mcp-show-catalog" aria-pressed="true" aria-controls="mcp-catalog">热门 MCP</button>
+            <button type="button" id="mcp-show-configured" aria-pressed="false" aria-controls="mcp-configured">已配置 <span id="mcp-tab-count"></span></button>
+          </div>
+          <label class="search mcp-search" id="mcp-catalog-search-field"><span class="sr-only">搜索热门 MCP</span><input type="search" id="mcp-catalog-search" placeholder="搜索工具或用途"></label>
+        </div>
+        <p class="feedback" id="mcp-feedback" role="status" hidden></p>
+        <section id="mcp-catalog" aria-labelledby="mcp-show-catalog">
+          <details class="integration" id="frameleap-setup">
+            <summary>
+              <span class="integration-title">
+                <span class="integration-name"><strong>FrameLeap 臻悦</strong><span class="mcp-hot">HOT</span></span>
+                <span class="integration-description">在 Claude Desktop 调用创作和视频工具</span>
+              </span>
+              <span class="status" id="state">检测中</span>
+            </summary>
+            <form id="configure" autocomplete="off">
+              <p class="muted" id="key-help">在臻悦打开「设置 → 接入 AI 助手」，复制工作区 MCP Key。</p>
+              <label class="field" for="mcp-key">FrameLeap MCP Key</label>
+              <div class="controls">
+                <input id="mcp-key" type="password" placeholder="粘贴以 fl_ 开头的 Key" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="key-help" required>
+                <button class="primary" id="configure-button" type="submit" disabled>验证并接入</button>
+              </div>
+              <p class="muted field-help" id="target">写入 Claude Desktop 当前配置</p>
+              <p class="feedback" id="feedback" role="status" hidden></p>
+            </form>
+          </details>
+          <div id="mcp-catalog-list" class="mcp-catalog-grid"></div>
+        </section>
+        <div id="mcp-configured" hidden>
+          <section class="mcp-servers" aria-labelledby="mcp-list-title">
+            <header class="mcp-list-header">
+              <div class="section-heading"><h2 id="mcp-list-title">已配置的 MCP</h2><span class="muted" id="mcp-count"></span></div>
+              <label class="search mcp-search"><span class="sr-only">搜索 MCP 服务</span><input type="search" id="mcp-search" placeholder="按服务名称搜索" disabled></label>
+            </header>
+            <div id="mcp-list" class="service-list"></div>
+            <p class="muted" id="mcp-note"></p>
+            <button type="button" class="secondary" id="undo-mcp" hidden>撤销上次 MCP 变更</button>
+            <button type="button" class="secondary" id="mcp-client-settings" hidden>前往客户端启动 <span aria-hidden="true">↗</span></button>
+          </section>
+        </div>
+      </section>
+
+      <section class="page usage-page" data-view="usage" aria-labelledby="usage-title" hidden>
+        <header class="page-header">
+          <h1 id="usage-title" tabindex="-1">用量与费用</h1>
+        </header>
+        <div class="usage-controls">
+          <label class="field">时间范围<select id="usage-days">
+            <option value="1">最近 24 小时</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option>
+          </select></label>
+          <label class="field">客户端<select id="usage-client"></select></label>
+          <button type="button" class="secondary" id="refresh-usage"><span aria-hidden="true">↻</span> 重新统计</button>
+        </div>
+        <p class="feedback" id="usage-feedback" role="status" hidden></p>
+        <div id="usage-results" hidden>
+          <div class="usage-summary">
+            <section class="usage-volume" aria-labelledby="usage-total-label">
+              <dl class="usage-volume-head">
+                <div><dt id="usage-total-label">Token 总量</dt><dd class="usage-hero-value usage-token" id="usage-total">—</dd></div>
+                <div class="usage-input-summary"><dt>输入（含缓存）</dt><dd class="usage-token" id="usage-input">—</dd></div>
+              </dl>
+              <div class="usage-mix" id="usage-mix" aria-hidden="true">
+                <span class="usage-uncached" id="usage-mix-uncached"></span>
+                <span class="usage-cache-read" id="usage-mix-cache-read"></span>
+                <span class="usage-cache-write" id="usage-mix-cache-write"></span>
+                <span class="usage-output" id="usage-mix-output"></span>
+              </div>
+              <dl class="usage-breakdown">
+                <div class="usage-uncached"><dt>未缓存输入</dt><dd class="usage-token" id="usage-uncached">—</dd></div>
+                <div class="usage-cache-read"><dt>缓存读</dt><dd class="usage-token" id="usage-cache-read">—</dd></div>
+                <div class="usage-cache-write"><dt>缓存写</dt><dd class="usage-token" id="usage-cache-write">—</dd></div>
+                <div class="usage-output"><dt>输出</dt><dd class="usage-token" id="usage-output">—</dd></div>
+              </dl>
+            </section>
+            <dl class="usage-estimate">
+              <dt>参考费用 · 人民币</dt>
+              <dd class="usage-hero-value" id="usage-cost">—</dd>
+              <dd class="muted" id="usage-cost-caption">按公开 API 价估算</dd>
+              <dd id="usage-cost-note" hidden></dd>
+            </dl>
+          </div>
+          <section class="usage-detail" aria-labelledby="usage-detail-title">
+            <div class="section-heading"><h2 id="usage-detail-title">按模型明细</h2><span class="muted" id="usage-scale">1 M = 100 万 Token</span></div>
+            <div id="usage-table" class="usage-table" role="region" tabindex="0" aria-labelledby="usage-detail-title">
+              <table role="table" aria-describedby="usage-scale">
+                <thead role="rowgroup"><tr role="row">
+                  <th role="columnheader" scope="col">模型 / 客户端</th>
+                  <th role="columnheader" scope="col" aria-sort="descending">总量 <span aria-hidden="true">↓</span></th>
+                  <th role="columnheader" scope="col">未缓存输入</th>
+                  <th role="columnheader" scope="col">缓存读</th>
+                  <th role="columnheader" scope="col">缓存写</th>
+                  <th role="columnheader" scope="col">输出</th>
+                  <th role="columnheader" scope="col">参考费用</th>
+                </tr></thead>
+                <tbody id="usage-rows" role="rowgroup"></tbody>
+              </table>
+            </div>
+            <p class="empty" id="usage-empty" hidden></p>
+            <div class="usage-notes">
+              <p class="muted" id="usage-coverage" hidden></p>
+              <details class="usage-pricing">
+                <summary>计价说明 <span id="usage-pricing-date"></span></summary>
+                <p class="muted">参考费用按模型公开 API 价估算，有上下限时取中点，金额按元显示。订阅、套餐、折扣及工具费用以实际账单为准。</p>
+                <p class="muted" id="usage-exchange"></p>
+              </details>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog id="restart-dialog" aria-labelledby="restart-title" aria-describedby="restart-description">
+    <form method="dialog">
+      <h2 id="restart-title"></h2>
+      <p id="restart-description" class="muted">重启会退出当前窗口。请先保存正在进行的工作。</p>
+      <div class="button-row">
+        <button type="submit" value="cancel" class="secondary" autofocus>取消</button>
+        <button type="submit" value="restart" class="primary">确认重启</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

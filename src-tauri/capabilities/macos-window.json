@@ -1,0 +1,7 @@
+{
+  "identifier": "macos-window",
+  "description": "允许从窗口顶部的空白区域拖动和缩放主窗口",
+  "platforms": ["macOS"],
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize"]
+}

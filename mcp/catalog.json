@@ -1,0 +1,123 @@
+{
+  "$schema": "./catalog.schema.json",
+  "version": 1,
+  "servers": [
+    {
+      "id": "context7",
+      "name": "Context7",
+      "category": "开发文档",
+      "description": "为正在使用的库和框架查询文档与代码示例。",
+      "source": "https://context7.com/docs/resources/all-clients",
+      "variants": [
+        {
+          "transport": "http",
+          "endpoint": "https://mcp.context7.com/mcp",
+          "input": { "target": "header", "key": "Authorization", "prefix": "Bearer ", "label": "Context7 API Key", "required": false },
+          "note": "可以先留空使用基础额度。遇到限流时，在 Context7 控制台创建 API Key。"
+        },
+        {
+          "transport": "stdio",
+          "endpoint": "npx",
+          "args": ["-y", "@upstash/context7-mcp"],
+          "input": { "target": "env", "key": "CONTEXT7_API_KEY", "label": "Context7 API Key", "required": false },
+          "requires": "Node.js 20+（npx）",
+          "note": "可以先留空使用基础额度。遇到限流时，在 Context7 控制台创建 API Key。"
+        }
+      ]
+    },
+    {
+      "id": "deepwiki",
+      "name": "DeepWiki",
+      "category": "开源代码",
+      "description": "查阅公开 GitHub 仓库的架构说明，或围绕代码提问。",
+      "source": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+      "variants": [
+        { "transport": "http", "endpoint": "https://mcp.deepwiki.com/mcp" },
+        {
+          "transport": "stdio",
+          "endpoint": "npx",
+          "args": ["-y", "mcp-remote", "https://mcp.deepwiki.com/mcp"],
+          "requires": "Node.js 20+（npx）"
+        }
+      ]
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "category": "代码协作",
+      "description": "以只读模式查询仓库、Issue 和 Pull Request。",
+      "source": "https://github.com/github/github-mcp-server/blob/main/docs/server-configuration.md#read-only-mode",
+      "variants": [
+        {
+          "transport": "http",
+          "endpoint": "https://api.githubcopilot.com/mcp/",
+          "options": { "X-MCP-Readonly": "true" },
+          "input": { "target": "header", "key": "Authorization", "prefix": "Bearer ", "label": "GitHub 个人访问令牌", "required": true },
+          "note": "使用仅有读取权限、且能访问目标仓库的令牌。"
+        },
+        {
+          "transport": "stdio",
+          "endpoint": "docker",
+          "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "-e", "GITHUB_READ_ONLY=1", "ghcr.io/github/github-mcp-server"],
+          "input": { "target": "env", "key": "GITHUB_PERSONAL_ACCESS_TOKEN", "label": "GitHub 个人访问令牌", "required": true },
+          "requires": "已启动 Docker",
+          "note": "使用仅有读取权限、且能访问目标仓库的令牌。"
+        }
+      ]
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "category": "知识管理",
+      "description": "连接 Notion 工作区，搜索和更新获准访问的页面。",
+      "source": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+      "variants": [
+        {
+          "transport": "http",
+          "clients": ["code", "codex", "opencode", "qwen", "kimi", "copilot"],
+          "endpoint": "https://mcp.notion.com/mcp",
+          "oauth": true
+        },
+        {
+          "transport": "stdio",
+          "endpoint": "npx",
+          "args": ["-y", "mcp-remote", "https://mcp.notion.com/mcp"],
+          "requires": "Node.js 20+（npx）",
+          "oauth": true
+        }
+      ]
+    },
+    {
+      "id": "playwright",
+      "name": "Playwright",
+      "category": "浏览器测试",
+      "description": "操作网页，检查界面和交互流程。",
+      "source": "https://github.com/microsoft/playwright-mcp",
+      "variants": [
+        {
+          "transport": "stdio",
+          "endpoint": "npx",
+          "args": ["-y", "@playwright/mcp@latest", "--isolated"],
+          "requires": "Node.js 18+（npx）",
+          "note": "使用独立浏览器会话。按客户端提示准备浏览器。"
+        }
+      ]
+    },
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "category": "本机文件",
+      "description": "从指定目录读取文件、搜索内容和浏览目录。",
+      "source": "https://github.com/modelcontextprotocol/servers/blob/main/src/filesystem/README.md",
+      "variants": [
+        {
+          "transport": "stdio",
+          "endpoint": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "--read-only", "--confine-roots"],
+          "input": { "target": "directory", "label": "允许读取的目录", "required": true },
+          "requires": "Node.js（npx）"
+        }
+      ]
+    }
+  ]
+}
