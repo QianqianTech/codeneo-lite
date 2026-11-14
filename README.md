@@ -4,10 +4,10 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 ## 下载安装
 
-- **Windows x64**　[下载 `0.1.1` 安装程序（.exe）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.1/CodeNeo-Lite_0.1.1_Windows_x64_Setup.exe)，双击按提示安装。
-- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载 `0.1.1` 通用版（.dmg）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.1/CodeNeo-Lite_0.1.1_macOS_universal.dmg)，打开后将应用拖到「应用程序」。
+- **Windows x64**　[下载 `0.1.2` 安装程序（.exe）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_Windows_x64_Setup.exe)，双击按提示安装。
+- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载 `0.1.2` 通用版（.dmg）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_macOS_universal.dmg)，打开后将应用拖到「应用程序」。
 
-这是公开预览版。Windows 安装程序未签名，macOS 版已签名，Apple 公证尚未完成。首次打开可能遇到系统提示。 [发布说明与 SHA-256 校验](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.1)
+这是公开预览版。Windows 安装程序未签名，macOS 版已签名，Apple 公证尚未完成。首次打开可能遇到系统提示。 [发布说明与 SHA-256 校验](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.2)
 
 各版本的改动见 [更新日志](CHANGELOG.md)。
 
