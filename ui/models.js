@@ -4,6 +4,8 @@
   const { $, invoke, element, button, option, message, errorText } = lite;
   const form = $("model-form");
   const desktopList = $("desktop-model-list");
+  const modelIdInput = $("model-id");
+  const manualIdsInput = $("manual-model-ids");
   const library = $("model-library");
   const modelList = $("model-list");
   const providerIndex = $("library-providers");
@@ -87,8 +89,12 @@
     search.placeholder = "搜索名称、模型 ID 或服务商";
   }
 
+  function searchText(value) { return value.normalize("NFKC").toLowerCase(); }
+  function searchTerms(query) { return searchText(query).trim().split(/\s+/).filter(Boolean); }
+
   function matchesSearch(terms, ...parts) {
-    const text = parts.join(" ").toLowerCase();
+    if (!terms.length) return true;
+    const text = searchText(parts.join(" "));
     return terms.every(term => text.includes(term));
   }
 
@@ -268,7 +274,7 @@
     const focused = modelList.contains(active) || providerIndex.contains(active) ? active.id : "";
     const directory = tab === "catalog";
     const { query, target, provider } = filters[tab];
-    const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const terms = searchTerms(query);
     const ready = lite.data.presets.length > 0;
     const summary = $("library-summary");
     library.dataset.tab = tab;
@@ -354,18 +360,33 @@
   }
   function target() { return lite.client(editor?.target || "-"); }
   function isAuto(id) { return apiModelId(id).toLowerCase() === "auto"; }
-  function supportsCandidate(id) { return !isAuto(id) || editor?.target !== "desktop"; }
+  function supportsCandidate(id) { return !editor.desktop || !isAuto(id); }
 
-  function desktopModelLines(text = desktopList.value) {
+  function modelLines(text) {
     return text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   }
 
-  function desktopModelsForDraft() {
-    if ($("desktop-model-options").hidden) return null;
-    const manual = desktopModelLines();
-    const selected = editor.id ? [] : selectedModels();
-    if (editor.target !== "desktop" || selected.length < 2) return manual;
-    return [...new Set([...manual, ...selected].map(apiModelId))];
+  function mergeModelIds(current, added) {
+    const ids = new Map(current.map(id => [apiModelId(id), id]));
+    for (const id of added) {
+      const key = apiModelId(id);
+      if (!ids.has(key)) ids.set(key, id);
+    }
+    return [...ids.values()];
+  }
+
+  function desktopModelsForDraft(selected, primary) {
+    if (!editor.desktop) return $("desktop-model-options").hidden ? null : modelLines(desktopList.value);
+    // A profile with one implicit Desktop model can keep using its model ID.
+    if (!editor.hadDesktopList && selected.length === 1 && apiModelId(selected[0]) === apiModelId(primary)) return [];
+    return selected.map(apiModelId);
+  }
+
+  function draftModels() {
+    const selected = selectedModels();
+    const primary = editor.id ? modelIdInput.value.trim() : selected[0] || "";
+    const desktopModels = desktopModelsForDraft(selected, primary);
+    return { selected, desktopModels, model: primary || desktopModels?.[0] || "" };
   }
 
   function setCandidates(models, kind, limited = false) {
@@ -379,82 +400,115 @@
     $("code-model-catalog").replaceChildren(...candidates.map(model => option(model.name || model.id, model.id)));
     source = kind;
     partial = limited;
-    candidateLimit = catalogPageSize;
-    $("candidate-search").value = "";
-    renderCandidates();
+    if (kind === "preset") $("candidate-search").value = "";
+    refreshCandidateResults();
   }
 
   function selectCandidate(id) {
-    $("model-id").value = id;
-    syncCandidateChecks();
+    modelIdInput.value = id;
     message($("editor-feedback"), "");
     editorControls();
   }
 
   function selectedModels() {
-    const primary = $("model-id").value.trim();
-    const models = new Map();
-    if (primary) models.set(apiModelId(primary), primary);
-    for (const id of editor.selected.values()) {
-      if (!models.has(apiModelId(id))) models.set(apiModelId(id), id);
-    }
-    return [...models.values()];
+    if (!editor.desktop) return editor.selected;
+    if (editor.desktopSelection !== null) return editor.desktopSelection;
+    const primary = modelIdInput.value.trim();
+    return primary && supportsCandidate(primary) ? [primary] : [];
   }
 
   function syncCandidateChecks() {
-    const primary = apiModelId($("model-id").value);
+    const primary = apiModelId(modelIdInput.value);
+    const selected = new Set(selectedModels().map(apiModelId));
     for (const control of $("candidate-list").querySelectorAll("[data-model]")) {
       const id = apiModelId(control.dataset.model);
-      if (control.type === "checkbox") control.checked = editor.selected.has(id) || primary === id;
-      else control.setAttribute("aria-pressed", String(primary === id));
+      if (control.type === "checkbox") {
+        control.checked = selected.has(id);
+      } else {
+        control.setAttribute("aria-pressed", String(primary === id));
+        control.lastElementChild.textContent = primary === id ? "当前" : "使用";
+      }
     }
   }
 
-  function toggleCandidate(id, checked) {
-    const key = apiModelId(id);
-    const primary = $("model-id");
-    if (checked) {
-      const previous = primary.value.trim();
-      if (previous) editor.selected.set(apiModelId(previous), previous);
-      editor.selected.set(key, id);
-      if (!previous) primary.value = id;
-    } else {
-      editor.selected.delete(key);
-      if (apiModelId(primary.value) === key) primary.value = editor.selected.values().next().value || "";
-    }
-    syncCandidateChecks();
+  function updateSelection(models) {
+    if (editor.desktop) editor.desktopSelection = models;
+    else editor.selected = models;
     message($("editor-feedback"), "");
     editorControls();
   }
 
+  function toggleCandidate(id, checked) {
+    const selected = selectedModels();
+    const key = apiModelId(id);
+    updateSelection(checked ? mergeModelIds(selected, [id]) : selected.filter(model => apiModelId(model) !== key));
+  }
+
+  function addManualModels() {
+    const ids = modelLines(manualIdsInput.value);
+    if (!ids.length) return true;
+    if (ids.some(id => !apiModelId(id) || /[\s\u0000-\u001f\u007f-\u009f]/u.test(id) || new TextEncoder().encode(id).length > 256)) {
+      message($("editor-feedback"), "error", "请每行填写一个有效的模型 ID，模型 ID 内不能有空格。");
+    } else if (ids.some(id => !supportsCandidate(id))) {
+      message($("editor-feedback"), "error", "Claude Desktop 需要具体的模型 ID。请移除 auto。");
+    } else {
+      manualIdsInput.value = "";
+      updateSelection(mergeModelIds(selectedModels(), ids));
+      return true;
+    }
+    $("manual-models").open = true;
+    manualIdsInput.focus();
+    return false;
+  }
+
   function renderSelectedModels(selected) {
-    $("selected-models").hidden = !!editor.id || selected.length < 2;
-    $("selected-count").textContent = `已选 ${selected.length} 个模型`;
+    $("selected-models").hidden = !!editor.id && !editor.desktop;
+    $("selected-title").textContent = editor.desktop ? "Claude Desktop 模型" : "已选模型";
+    $("selected-count").textContent = `已选 ${selected.length} 个`;
+    const empty = $("selected-empty");
+    const canUseProfile = editor.desktop && !editor.target && modelIdInput.value.trim() && supportsCandidate(modelIdInput.value);
+    empty.textContent = canUseProfile ? "列表留空时使用档案模型 ID。" : "从目录勾选模型，或手动添加模型 ID。";
+    empty.hidden = !!selected.length;
     const list = $("selected-model-list");
     list.replaceChildren();
     if ($("selected-models").hidden) return;
-    for (const id of selected) {
+    for (const [index, id] of selected.entries()) {
       const row = element("li");
-      const remove = button("取消勾选", () => {
+      const actions = element("div", "button-row");
+      if (index === 0) {
+        actions.append(element("span", "default-model-tag", "默认"));
+      } else {
+        const makeDefault = button("设为默认", () => {
+          updateSelection([id, ...selected.filter(model => model !== id)]);
+          list.scrollTop = 0;
+          list.firstElementChild?.querySelector("button")?.focus({ preventScroll: true });
+        }, "text-button");
+        makeDefault.disabled = busy;
+        makeDefault.setAttribute("aria-label", `将 ${id} 设为默认`);
+        actions.append(makeDefault);
+      }
+      const remove = button("移除", () => {
         toggleCandidate(id, false);
-        ($("selected-models").hidden ? $("candidate-search") : $("selected-count")).focus();
+        const next = list.children[Math.min(index, list.children.length - 1)];
+        (next?.querySelector("button:last-child") || $("candidate-search")).focus();
       }, "text-button");
       remove.disabled = busy;
-      remove.setAttribute("aria-label", `取消勾选 ${id}`);
-      row.append(element("code", "", id), remove);
+      remove.setAttribute("aria-label", `移除 ${id}`);
+      actions.append(remove);
+      row.append(element("code", "", id), actions);
       list.append(row);
     }
   }
 
   function renderCandidates() {
     const list = $("candidate-list");
-    const query = $("candidate-search").value.trim().toLowerCase();
+    const terms = searchTerms($("candidate-search").value);
     const options = connectionReady() ? candidates.filter(model => supportsCandidate(model.id)) : [];
-    const matches = options.filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query));
+    const matches = options.filter(model => matchesSearch(terms, model.name, model.id));
     list.replaceChildren();
+    const multiple = !editor.id || editor.desktop;
     for (const model of matches.slice(0, candidateLimit)) {
-      const multiple = !editor.id;
-      const row = multiple ? element("label", "candidate-option") : button("", () => selectCandidate(model.id));
+      const row = multiple ? element("label", "candidate-option") : button("", () => selectCandidate(model.id), "candidate-option");
       if (multiple) {
         const check = element("input");
         check.type = "checkbox";
@@ -463,14 +517,13 @@
         row.append(check);
       } else {
         row.dataset.model = model.id;
-        const radio = element("span", "model-radio");
-        radio.setAttribute("aria-hidden", "true");
-        row.append(radio);
+        row.setAttribute("aria-label", `使用 ${model.name || model.id}`);
       }
       const label = element("span");
       label.append(element("strong", "", model.name || model.id));
       if (model.name && model.name !== model.id) label.append(element("small", "", model.id));
       row.append(label);
+      if (!multiple) row.append(element("span", "candidate-action"));
       list.append(row);
     }
     if (matches.length > candidateLimit) {
@@ -483,10 +536,19 @@
       }, "candidate-more"));
     }
     syncCandidateChecks();
-    if (!matches.length) list.append(element("p", "empty", query ? "没有匹配的模型。" : "可在下方手动填写服务商提供的模型 ID。"));
-    $("catalog-source").textContent = source === "remote"
-      ? `服务商返回 ${options.length} 个模型${partial ? "（部分目录）" : ""}。`
-      : options.length ? "预置参考。用「重新加载」查询此 Key 的模型目录。" : "模型 ID 可在服务商控制台查看。";
+    if (!matches.length) list.append(element("p", "empty", terms.length && options.length
+      ? "当前列表没有匹配的模型。" : "可手动填写服务商提供的模型 ID。"));
+    const summary = source === "remote"
+      ? `账号目录 · ${options.length} 个模型${partial ? "（部分目录）" : ""}`
+      : options.length ? `预置参考 · ${options.length} 个模型${currentPreset()?.id === "qwen" ? "（以套餐权限为准）" : ""}`
+        : "当前没有可搜索的模型";
+    $("catalog-source").textContent = terms.length ? `${summary} · 匹配 ${matches.length} 个` : summary;
+  }
+
+  function refreshCandidateResults() {
+    candidateLimit = catalogPageSize;
+    renderCandidates();
+    $("candidate-list").scrollTop = 0;
   }
 
   function connectionReady() {
@@ -496,10 +558,11 @@
     return !!(preset && $("provider-key").value.trim() && (preset.id !== "custom" || $("provider-url").value.trim()));
   }
 
-  function resetCatalogSelection() {
-    editor.selected.clear();
-    $("model-id").value = editor.initialModel;
-    setCandidates(currentPreset()?.models || [], "preset");
+  function resetModelSelection() {
+    editor.selected = editor.initialModel ? [editor.initialModel] : [];
+    editor.desktopSelection = null;
+    modelIdInput.value = editor.initialModel;
+    manualIdsInput.value = "";
   }
 
   function saveBeforeApplying() {
@@ -510,29 +573,30 @@
     if (!editor) return;
     for (const input of form.querySelectorAll("button, input, select, textarea")) input.disabled = busy;
     $("provider-picker").disabled = busy || !!editor.id;
+    const { selected, desktopModels, model } = draftModels();
+    const current = target();
+    const probeId = (editor.desktop && selected[0]) || (editor.target === "desktop" ? "" : model);
     if (!busy) {
-      for (const id of ["fetch-models", "skip-catalog", "refresh-catalog"]) $(id).disabled = !connectionReady();
-      const entries = desktopModelsForDraft() || [];
-      const primary = $("model-id").value.trim();
-      const id = editor.target === "desktop" ? entries[0] || primary : primary || entries[0];
-      $("probe-model").disabled = !connectionReady() || !id || !supportsCandidate(id);
-      $("save-model").disabled = !connectionReady() || !id || !supportsCandidate(id);
-      const candidate = $("model-id").value.trim();
-      $("add-desktop-candidate").disabled = !candidate || isAuto(candidate) || desktopModelLines().includes(candidate);
+      const ready = connectionReady();
+      for (const id of ["fetch-models", "skip-catalog", "refresh-catalog"]) $(id).disabled = !ready;
+      $("probe-model").disabled = !ready || !probeId;
+      $("save-model").disabled = !ready || !model || (editor.target === "desktop" && !selected.length);
+      $("add-manual-model").disabled = !manualIdsInput.value.trim();
+      const listed = new Set((desktopModels || []).map(apiModelId));
+      $("add-desktop-candidate").disabled = !selected.some(id => !isAuto(id) && !listed.has(apiModelId(id)));
       $("provider-auth").disabled = $("provider-protocol").value !== "anthropic";
     }
+    $("probe-model").title = probeId ? `测试 ${probeId}` : "";
     form.setAttribute("aria-busy", String(busy));
-    const current = target();
     const context = new Set([current?.name, currentPreset()?.name, currentAccount()?.name].filter(Boolean));
     $("editor-target").textContent = Array.from(context).join(" · ");
-    const picked = $("editor-picked");
-    picked.textContent = $("model-id").value.trim();
-    picked.hidden = $("connection-step").hidden || !picked.textContent;
-    const selected = selectedModels();
+    $("editor-target").hidden = !context.size;
+    $("model-id-field").hidden = !editor.id || editor.target === "desktop";
+    $("model-id-label").textContent = editor.desktop ? "档案模型 ID"
+      : ["code", "codex"].includes(current?.id) ? "默认模型 ID" : "模型 ID";
+    $("profile-model-help").hidden = !editor.desktop;
+    syncCandidateChecks();
     renderSelectedModels(selected);
-    const canChooseDefault = ["code", "codex"].includes(current?.id)
-      || current?.id === "desktop" && selected.length > 1 && !desktopModelLines().length;
-    $("model-id-label").textContent = canChooseDefault ? "默认模型 ID" : "模型 ID";
     const save = $("save-model");
     if (!editor.id && selected.length > 1) {
       const count = selected.length;
@@ -568,12 +632,12 @@
     $("provider-key").placeholder = account?.has_key ? "使用已保存的 Key" : "粘贴从服务商获取的 Key";
     $("provider-key-help").textContent = account?.has_key
       ? "留空继续使用已保存的 Key。填写新 Key 会更新该接入账号。"
-      : account ? "请为此接入账号重新填写 API Key。"
+      : presetId === "qwen" ? "请从千问 Token Plan 订阅页复制以 sk-sp- 开头的专属 API Key。"
+        : account ? "请为此接入账号重新填写 API Key。"
         : preset ? `在 ${preset.name} 的控制台创建或复制 API Key。` : "先选一个服务商，再粘贴它提供的 API Key。";
     if (resetOnProviderChange && editor.preset !== presetId) {
-      $("model-id").value = "";
       $("model-name").value = "";
-      editor.selected.clear();
+      resetModelSelection();
       desktopList.value = "";
       for (const input of Object.values(codeInputs)) input.value = "";
     }
@@ -590,7 +654,8 @@
     const preset = currentPreset();
     const anthropic = (currentAccount()?.clients || (preset?.id === "custom" ? [] : preset?.clients) || []).includes("desktop")
       || $("provider-protocol").value === "anthropic" && (!preset || preset.id === "custom");
-    $("desktop-model-options").hidden = !anthropic || (!!client && client.id !== "desktop");
+    editor.desktop = editor.target === "desktop" || (!client && !!editor.id && anthropic);
+    $("desktop-model-options").hidden = !anthropic || !!client || editor.desktop;
     $("code-model-options").hidden = !anthropic || (!!client && client.id !== "code");
   }
 
@@ -605,8 +670,17 @@
       else item.removeAttribute("aria-current");
     }
     editorControls();
-    if (select) $(candidates.length ? "candidate-search" : "model-id").focus();
-    else $(currentAccount() || currentPreset() ? "provider-key" : "provider-picker").focus();
+    window.scrollTo(0, 0);
+    if (!select) {
+      $(currentAccount() || currentPreset() ? "provider-key" : "provider-picker").focus({ preventScroll: true });
+    } else if (candidates.some(model => supportsCandidate(model.id))) {
+      $("candidate-search").focus({ preventScroll: true });
+    } else if (!$("selected-models").hidden) {
+      $("manual-models").open = true;
+      manualIdsInput.focus();
+    } else {
+      modelIdInput.focus();
+    }
   }
 
   function syncAccounts(preferredId) {
@@ -629,9 +703,12 @@
     if (!invoke || busy || !lite.data.presets.length) return;
     const scrollY = window.scrollY;
     lite.show("models");
+    const initialModel = model?.model || modelId || "";
+    const desktopModels = model?.desktop_models || [];
     editor = {
       id: model?.id || null, target: targetId || "", fromClient, opener: opener?.id, scrollY,
-      initialModel: model?.model || modelId || "", selected: new Map(),
+      initialModel, selected: !model && initialModel ? [initialModel] : [],
+      desktopSelection: desktopModels.length ? desktopModels : null, hadDesktopList: !!desktopModels.length,
     };
     const current = target();
     const saved = model ? accountFor(model) : lite.data.accounts.find(account => account.id === accountId);
@@ -643,17 +720,17 @@
     $("provider-picker").value = provider || "";
     const existing = syncAccounts(saved?.id ?? (provider ? undefined : ""));
     editor.account = existing?.id || "";
-    $("model-id").value = editor.initialModel;
+    modelIdInput.value = initialModel;
     $("model-name").value = model?.name || "";
-    desktopList.value = (model?.desktop_models || []).join("\n");
-    $("desktop-model-options").open = (targetId === "desktop" && !!model) || !!model?.desktop_models?.length;
-    $("code-model-options").open = (targetId === "code" && showOptions) || Object.values(model?.code_models || {}).some(Boolean);
+    desktopList.value = desktopModels.join("\n");
+    $("desktop-model-options").open = !!desktopModels.length;
+    $("code-model-options").open = targetId === "code" && (showOptions || Object.values(model?.code_models || {}).some(Boolean));
     for (const [role, input] of Object.entries(codeInputs)) input.value = model?.code_models?.[role] || "";
-    $("add-desktop-candidate").hidden = false;
-    $("selected-models").open = false;
+    manualIdsInput.value = "";
+    $("manual-models").open = false;
     $("account-name").value = "";
     $("account-options").open = false;
-    $("form-title").textContent = model ? "编辑已保存的模型" : "配置新模型";
+    $("form-title").textContent = model ? "编辑模型档案" : "配置新模型";
     $("close-model").textContent = editor.fromClient ? "返回客户端" : "返回模型库";
     message($("editor-feedback"), "");
     syncConnection();
@@ -661,7 +738,6 @@
     library.hidden = true;
     $("model-header-actions").hidden = true;
     form.hidden = false;
-    window.scrollTo(0, 0);
     const skipConnection = existing?.has_key && (model || modelId || showOptions || catalog);
     step(skipConnection ? "selection" : "connection");
     if (fetchCatalog && existing?.has_key) void loadCatalog();
@@ -684,8 +760,7 @@
   }
 
   function draft(test = false) {
-    const desktopModels = desktopModelsForDraft();
-    const model = $("model-id").value.trim();
+    const { selected, desktopModels, model } = draftModels();
     const codeModels = $("code-model-options").hidden ? null : Object.fromEntries(
       Object.entries(codeInputs).map(([role, input]) => [role, input.value]),
     );
@@ -698,11 +773,8 @@
       auth: $("provider-auth").value,
       protocol: $("provider-protocol").value,
       key: $("provider-key").value,
-      name: $("model-name").value || (!editor.id && selectedModels().length > 1
-        ? candidateName(model) : ""),
-      model: test && editor.target === "desktop"
-        ? desktopModels?.[0] || model
-        : model || desktopModels?.[0] || "",
+      name: $("model-name").value || (!editor.id && selected.length > 1 ? candidateName(model) : ""),
+      model: test && editor.desktop && selected.length ? selected[0] : model,
       desktop_models: desktopModels ?? (editor.account !== $("account-picker").value ? [] : null),
       code_models: codeModels ?? (editor.account !== $("account-picker").value ? {} : null),
     };
@@ -715,6 +787,7 @@
 
   async function loadCatalog() {
     if (busy || !editor || !connectionReady()) return;
+    const fromConnection = !$("connection-step").hidden;
     const input = draft();
     const client = editor.target || null;
     busy = true;
@@ -727,21 +800,34 @@
       message($("editor-feedback"), count ? "success" : "warning", count
         ? `已读取 ${count} 个模型。` : "服务商返回的列表没有可选模型。可手动填写模型 ID。");
     } catch (error) {
-      message($("editor-feedback"), "warning", `${errorText(error)} 可继续选择预置模型或手动填写模型 ID。`);
+      const detail = errorText(error);
+      const reason = currentPreset()?.id === "qwen" && detail.endsWith("（HTTP 401）")
+        ? "账号目录鉴权失败（HTTP 401）。请确认使用千问 Token Plan 专属 API Key（以 sk-sp- 开头）。"
+        : `未能读取账号目录：${detail}`;
+      const fallback = source === "remote" ? "仍可搜索上次读取的目录或手动填写模型 ID。"
+        : candidates.length ? "仍可搜索预置模型或手动填写模型 ID。" : "可手动填写模型 ID。";
+      message($("editor-feedback"), "warning", `${reason} ${fallback}`);
     } finally {
       busy = false;
-      step("selection");
+      if (fromConnection) step("selection");
+      else {
+        editorControls();
+        $("refresh-catalog").focus({ preventScroll: true });
+      }
     }
   }
 
   async function runModelAction(command) {
-    if (busy || !editor || $("save-model").disabled) return;
-    const input = draft(command === "test_model");
+    if (busy || !editor) return;
+    const testing = command === "test_model";
+    if ($(testing ? "probe-model" : "save-model").disabled) return;
+    if (!testing && !$("selected-models").hidden && !addManualModels()) return;
+    const input = draft(testing);
     if (command === "save_model" && input.desktop_models?.some(isAuto)) {
       message($("editor-feedback"), "error", "Desktop 列表需要具体模型 ID。请移除 auto。");
       return;
     }
-    const targetId = editor.target;
+    const targetId = testing && editor.desktop && selectedModels().length ? "desktop" : editor.target;
     const selection = editor.id ? [] : selectedModels();
     const batch = command === "save_model" && selection.length > 1;
     const selected = selection.slice(1).map(id => ({ model: id, name: candidateName(id) }));
@@ -750,9 +836,9 @@
     const apply = command === "save_model" && !agent && !selectAfterSave && lite.canApply(target());
     busy = true;
     editorControls();
-    message($("editor-feedback"), "pending", command === "test_model" ? "正在发送一条简短测试请求…" : "正在保存模型…");
+    message($("editor-feedback"), "pending", testing ? "正在发送一条简短测试请求…" : "正在保存模型…");
     try {
-      if (command === "test_model") {
+      if (testing) {
         const result = await invoke(command, { input, client: targetId || null });
         message($("editor-feedback"), result.healthy ? "success" : "error",
           result.healthy ? `${result.message}，耗时 ${result.latency_ms} 毫秒。` : result.message);
@@ -801,7 +887,7 @@
   });
   $("account-picker").addEventListener("change", () => {
     if (!$("provider-picker").value && currentAccount()) $("provider-picker").value = providerId(currentAccount());
-    if (source === "remote" && !editor.id) resetCatalogSelection();
+    if (source === "remote" && !editor.id) resetModelSelection();
     syncAccounts($("account-picker").value);
     syncConnection({ resetOnProviderChange: true });
     message($("editor-feedback"), "");
@@ -816,30 +902,33 @@
   });
   desktopList.addEventListener("input", () => { message($("editor-feedback"), ""); editorControls(); });
   $("add-desktop-candidate").addEventListener("click", () => {
-    const id = $("model-id").value.trim();
-    const list = desktopModelLines();
-    if (!id || isAuto(id) || list.includes(id)) return;
-    desktopList.value = [...list, id].join("\n");
+    desktopList.value = mergeModelIds(modelLines(desktopList.value), selectedModels().filter(id => !isAuto(id))).join("\n");
     editorControls();
   });
-  for (const id of ["provider-key", "provider-url", "provider-auth", "model-id"]) {
+  $("add-manual-model").addEventListener("click", () => {
+    if (addManualModels()) manualIdsInput.focus();
+  });
+  manualIdsInput.addEventListener("input", () => {
+    $("add-manual-model").disabled = !manualIdsInput.value.trim();
+    message($("editor-feedback"), "");
+  });
+  modelIdInput.addEventListener("input", () => { message($("editor-feedback"), ""); editorControls(); });
+  for (const id of ["provider-key", "provider-url", "provider-auth"]) {
     $(id).addEventListener("input", () => {
-      if (id === "model-id") {
-        syncCandidateChecks();
-      }
       if (id === "provider-url" || id === "provider-auth") $("provider-key").value = "";
-      if (id !== "model-id" && source === "remote") {
-        if (editor.id) setCandidates(currentPreset()?.models || [], "preset");
-        else resetCatalogSelection();
+      if (source === "remote") {
+        if (!editor.id) resetModelSelection();
+        setCandidates(currentPreset()?.models || [], "preset");
+      } else {
+        renderCandidates();
       }
-      if (id !== "model-id") renderCandidates();
       message($("editor-feedback"), "");
       editorControls();
     });
   }
-  $("candidate-search").addEventListener("input", () => {
-    candidateLimit = catalogPageSize;
-    renderCandidates();
+  $("candidate-search").addEventListener("input", refreshCandidateResults);
+  $("candidate-search").addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing) event.preventDefault();
   });
   $("model-search").addEventListener("input", event => changeFilter("query", event.currentTarget.value));
   $("library-client").addEventListener("change", event => changeFilter("target", event.currentTarget.value));

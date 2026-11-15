@@ -225,6 +225,25 @@ fn tool_continuation_without_thinking(request: &Value) -> bool {
         })
 }
 
+fn normalize_glm_effort(base: &Url, model: &str, request: &mut Value) -> bool {
+    if model != "glm-5.3"
+        || !crate::models::is_aliyun_token_plan(base)
+        || base.path().trim_end_matches('/') != "/apps/anthropic"
+    {
+        return false;
+    }
+    let Some(Value::String(effort)) = request.pointer_mut("/output_config/effort") else {
+        return false;
+    };
+    // Model Studio's Anthropic endpoint supports low, high and max for GLM-5.3.
+    *effort = match effort.as_str() {
+        "medium" => "high".into(),
+        "xhigh" => "max".into(),
+        _ => return false,
+    };
+    true
+}
+
 struct PendingSession {
     request: u64,
     session: String,
@@ -1014,6 +1033,14 @@ impl Gateway {
             }
         };
         let wants_stream = payload["stream"] == true;
+        if normalize_glm_effort(&route.base, &model, &mut payload) {
+            log.record(
+                "info",
+                "上游请求",
+                "GLM_EFFORT_NORMALIZED",
+                "已将思考强度映射为百炼 GLM-5.3 支持的值。",
+            );
+        }
         payload["model"] = json!(model);
         if let Some(object) = payload.as_object_mut() {
             object.remove("metadata");
@@ -1156,6 +1183,19 @@ async fn read_kimi_concurrency_error(response: &mut reqwest::Response) -> Option
 
 async fn upstream_error(mut response: reqwest::Response, log: &RequestLog) -> Response<Body> {
     let status = response.status();
+    if status == StatusCode::UNAUTHORIZED {
+        log.record(
+            "error",
+            "上游认证",
+            "GATEWAY_UPSTREAM_AUTH",
+            "供应商返回 HTTP 401。请核对模型库接入账号的 API Key 和服务地址。",
+        );
+        return non_retryable_error(
+            status,
+            "authentication_error",
+            "第三方供应商拒绝了 API Key（HTTP 401）。请在 CodeNeo Lite 的「模型库」核对接入账号的 Key 和服务地址，保存后重新应用档案。",
+        );
+    }
     if let Some(message) = read_kimi_concurrency_error(&mut response).await {
         log.record(
             "warn",
@@ -1275,6 +1315,36 @@ mod tests {
     use tokio::sync::Notify;
 
     #[test]
+    fn adapts_desktop_effort_for_glm_on_token_plan_without_changing_history() {
+        let token_plan =
+            Url::parse("https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic").unwrap();
+        let other = Url::parse("https://example.invalid/apps/anthropic").unwrap();
+        let request = json!({
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "medium", "format": {"type": "json_schema"}},
+            "messages": [
+                {"role": "user", "content": "Continue after the tool call."},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fixture", "name": "fixture", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_fixture", "content": "Finished."}]},
+            ]
+        });
+        let mut adapted = request.clone();
+        assert!(!normalize_glm_effort(&token_plan, "qwen4-max-preview", &mut adapted));
+        assert!(!normalize_glm_effort(&other, "glm-5.3", &mut adapted));
+        assert_eq!(adapted, request);
+
+        for (from, to) in [("medium", "high"), ("xhigh", "max")] {
+            let mut source = request.clone();
+            source["output_config"]["effort"] = json!(from);
+            assert!(normalize_glm_effort(&token_plan, "glm-5.3", &mut source));
+            let mut expected = request.clone();
+            expected["output_config"]["effort"] = json!(to);
+            assert_eq!(source, expected);
+            assert!(!normalize_glm_effort(&token_plan, "glm-5.3", &mut source));
+        }
+    }
+
+    #[test]
     fn parses_only_sse_event_names_across_chunks() {
         let mut sse = SseEvents::default();
         sse.observe(b"data: {\"text\":\"event: message_stop\"}\n\nevent: mess");
@@ -1286,6 +1356,28 @@ mod tests {
         assert!(!sse.failed);
         sse.observe(b"or\n\n");
         assert!(sse.failed);
+    }
+
+    #[tokio::test]
+    async fn upstream_unauthorized_points_to_the_provider_account_without_leaking_the_response() {
+        let upstream = Response::builder()
+            .url(Url::parse("https://custom.example/v1/messages").unwrap())
+            .status(StatusCode::UNAUTHORIZED)
+            .body("upstream-private-content")
+            .unwrap()
+            .into();
+        let log = RequestLog::new(&Method::POST, "/v1/messages");
+        let response = upstream_error(upstream, &log).await;
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(parts.headers["x-should-retry"], "false");
+        let body = body.collect().await.unwrap().to_bytes();
+        assert!(!std::str::from_utf8(&body)
+            .unwrap()
+            .contains("upstream-private-content"));
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"]["type"], "authentication_error");
+        assert!(error["error"]["message"].as_str().unwrap().contains("模型库"));
     }
 
     #[tokio::test]
@@ -1570,7 +1662,7 @@ mod tests {
     }
 
     // Run with CODENEO_TEST_CODEX set to a native CLI binary. The whole turn
-    // uses a fixture provider and a temporary CODEX_HOME.
+    // uses a fixture provider and records usage in a temporary CODEX_HOME.
     #[tokio::test]
     #[ignore = "requires an installed Codex CLI"]
     async fn native_codex_completes_a_turn_through_the_gateway() {
@@ -1599,7 +1691,7 @@ mod tests {
                 complete["status"] = json!("completed");
                 complete["output"] = json!([message]);
                 complete["usage"] = json!({"input_tokens":5,"output_tokens":5,"total_tokens":10,
-                    "input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}});
+                    "input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":1}});
                 let events = [
                     json!({"type":"response.created", "response":response}),
                     json!({"type":"response.output_item.added", "output_index":0,
@@ -1684,7 +1776,6 @@ args = ["%s", "fixture-codex-key"]
                 "-s",
                 "read-only",
                 "--skip-git-repo-check",
-                "--ephemeral",
                 "--color",
                 "never",
                 "--json",
@@ -1704,6 +1795,12 @@ args = ["%s", "fixture-codex-key"]
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("CODENEO-GATEWAY-FIXTURE-OK"));
+        let usage = crate::usage::codex_usage_fixture(&fixture.path().join("sessions"));
+        let [(model, tokens)] = usage.as_slice() else {
+            panic!("expected exactly one gateway model in the usage report");
+        };
+        assert_eq!(model, "fixture-model");
+        assert_eq!((tokens.input, tokens.cache_read, tokens.output), (3, 2, 5));
         tokio::time::timeout(Duration::from_secs(2), provider)
             .await
             .unwrap()

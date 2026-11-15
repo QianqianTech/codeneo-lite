@@ -6,8 +6,11 @@
   const form = $("mcp-editor");
   const quickForm = $("mcp-quick");
   const importForm = $("mcp-import");
+  const permissionDialog = $("mcp-permissions-dialog");
+  const permissionFeedback = $("mcp-permissions-feedback");
   const frameLeap = $("frameleap-setup");
   const transportLabels = { stdio: "本地命令（stdio）", http: "Streamable HTTP", sse: "HTTP SSE", other: "其他类型" };
+  const checkLabels = { pending: "验证中", success: "验证通过", error: "验证失败" };
   const scopeLabels = { user: "用户级", project: "项目共享", local: "本机项目" };
   const notes = {
     desktop: "完全退出并重新打开 Claude Desktop，再到「设置 → Developer」查看工具。",
@@ -31,7 +34,9 @@
   let busy = false;
   let sequence = 0;
   let servers = [];
-  const checks = new Map();
+  let checkLocation = "";
+  let checks = new Map();
+  let permission = null;
   const originalValues = new WeakMap();
   const editorFeedback = $("mcp-editor-feedback");
   const quickFeedback = $("mcp-quick-feedback");
@@ -139,6 +144,12 @@
     $("mcp-tab-count").textContent = location ? String(servers.length) : "";
   }
 
+  function showServerCheck(status, feedback, { kind, detail }) {
+    status.dataset.state = kind;
+    status.textContent = checkLabels[kind];
+    message(feedback, kind, detail);
+  }
+
   function renderServers() {
     const list = $("mcp-list");
     list.replaceChildren();
@@ -148,24 +159,38 @@
     for (const server of matching) {
       const row = element("article", "mcp-row");
       const label = element("div", "mcp-meta");
+      const identity = element("div", "mcp-identity");
+      const status = element("span", "status mcp-status", server.transport === "other" ? "不支持验证" : "未验证");
+      status.setAttribute("role", "status");
+      identity.append(element("strong", "", server.name), status);
       const state = server.enabled ? "已写入本机" : "配置已停用";
-      label.append(element("strong", "", server.name), element("p", "muted", `${transportLabels[server.transport] || transportLabels.other} · ${state}`));
       const feedback = element("p", "feedback");
       feedback.setAttribute("role", "status");
+      feedback.hidden = true;
       const check = checks.get(server.name);
-      message(feedback, check?.kind || "", check?.text);
-      label.append(feedback);
+      if (check) showServerCheck(status, feedback, check);
+      const granted = server.permissions?.always_allow.length || 0;
+      const access = granted ? ` · 始终允许 ${granted} 项` : "";
+      label.append(identity, element("p", "muted", `${transportLabels[server.transport] || transportLabels.other} · ${state}${access}`), feedback);
       const actions = element("div", "button-row");
       const isFrameLeap = selected === "desktop" && server.name === "frameleap";
-      if (isFrameLeap) {
+      if (isFrameLeap && !granted) {
         actions.append(button("更新 Key", openFrameLeap, "secondary"));
       }
       if (server.transport !== "other") {
-        const edit = button("编辑", () => openEditor(server), "secondary");
-        edit.setAttribute("aria-label", `编辑 ${server.name}`);
-        const verify = button("验证连接", () => verifyServer({ source: "saved", name: server.name }, feedback), "secondary");
+        if (!granted) {
+          const edit = button("编辑", () => openEditor(server), "secondary");
+          edit.setAttribute("aria-label", `编辑 ${server.name}`);
+          actions.append(edit);
+        }
+        const verify = button("验证连接", () => verifySaved(server, status, feedback), "secondary");
         verify.setAttribute("aria-label", `验证连接 ${server.name}`);
-        actions.append(edit, verify);
+        actions.append(verify);
+      }
+      if (server.permissions) {
+        const permissions = button("工具权限", () => openPermissions(server), "secondary");
+        permissions.setAttribute("aria-label", `工具权限 ${server.name}`);
+        actions.append(permissions);
       }
       if (lite.client(selected)?.mcp_toggle) {
         actions.append(button(server.enabled ? "停用" : "启用", () => changeServer("set_mcp_enabled", server.name, !server.enabled), "secondary"));
@@ -205,7 +230,8 @@
       const configure = button(existing ? "已配置" : "快速配置", () => {
         if (existing) {
           showView("configured");
-          if (existing.transport !== "other") void openEditor(existing);
+          if (existing.permissions?.always_allow.length) openPermissions(existing);
+          else if (existing.transport !== "other") void openEditor(existing);
         } else {
           openPreset(card);
         }
@@ -250,15 +276,15 @@
   async function refreshServers() {
     const request = ++sequence;
     const list = $("mcp-list");
+    const client = selected;
     location = null;
     servers = [];
-    checks.clear();
     renderLocation();
     renderCatalog();
     message(targetFeedback, "");
     list.removeAttribute("aria-busy");
     $("mcp-count").textContent = "";
-    if (!invoke || !selected || scope !== "user" && !project) {
+    if (!invoke || !client || scope !== "user" && !project) {
       list.replaceChildren(element("p", "empty", "选择目标客户端及配置范围后，这里会列出已有服务。"));
       controls();
       return;
@@ -267,10 +293,20 @@
     list.replaceChildren(element("p", "empty", "正在读取 MCP 配置…"));
     controls();
     try {
-      const result = await invoke("list_mcp", { client: selected, selection: selection() });
+      const result = await invoke("list_mcp", { client, selection: selection() });
       if (request === sequence) {
         location = result;
         servers = result.servers;
+        const key = `${client}/${result.location}`;
+        const previous = checkLocation === key ? checks : null;
+        checkLocation = key;
+        checks = new Map();
+        for (const server of servers) {
+          const check = previous?.get(server.name);
+          if (check && check.revision === server.revision && check.enabled === server.enabled) {
+            checks.set(server.name, check);
+          }
+        }
         renderLocation();
         renderServers();
         renderCatalog();
@@ -604,28 +640,148 @@
     return { name: editing || $("mcp-name").value.trim(), transport, endpoint: $("mcp-endpoint").value.trim(), args, options, revision, advanced: nativeInput() };
   }
 
-  async function verifyServer(target, feedback) {
+  function verifySaved(server, status, feedback) {
+    const name = server.name;
+    const check = { enabled: server.enabled };
+    void verifyServer({ source: "saved", name }, (kind, detail, revision) => {
+      if (kind === "pending") checks.set(name, check);
+      if (checks.get(name) !== check) return;
+      Object.assign(check, { kind, detail, revision: revision ?? server.revision });
+      if (status.isConnected) showServerCheck(status, feedback, check);
+      else renderServers();
+    });
+  }
+
+  function openPermissions(server) {
+    if (!canConfigure() || !server.permissions || selected !== "desktop") return;
+    const existing = server.permissions.always_allow;
+    permission = { server, where: destination(), names: new Set(existing), chosen: new Set(existing), busy: false };
+    $("mcp-permissions-title").textContent = `工具权限 · ${server.name}`;
+    $("mcp-permissions-hint").hidden = false;
+    $("mcp-permissions-hint").textContent = existing.length
+      ? "如需编辑服务连接，请先清空授权并保存。" : "读取工具列表后，可以逐项选择。";
+    message(permissionFeedback, "");
+    renderPermissionChoices();
+    permissionDialog.showModal();
+  }
+
+  function permissionControls() {
+    if (!permission) return;
+    const { chosen, server, busy } = permission;
+    const original = server.permissions.always_allow;
+    const changed = original.length !== chosen.size || original.some(name => !chosen.has(name));
+    $("mcp-permissions-count").textContent = `已选 ${chosen.size} 项`;
+    $("mcp-read-tools").disabled = busy;
+    $("mcp-clear-tools").disabled = busy || !chosen.size;
+    $("close-mcp-permissions").disabled = busy;
+    $("save-mcp-permissions").disabled = busy || !changed;
+    $("mcp-permissions-choices").disabled = busy;
+  }
+
+  function renderPermissionChoices() {
+    const data = permission;
+    const choices = Array.from(data.names).sort().map(name => {
+      const choice = element("label", "mcp-tool-choice");
+      const input = element("input");
+      input.type = "checkbox";
+      input.checked = data.chosen.has(name);
+      input.addEventListener("change", () => {
+        if (input.checked) data.chosen.add(name);
+        else data.chosen.delete(name);
+        permissionControls();
+      });
+      choice.append(input, element("span", "", name));
+      return choice;
+    });
+    $("mcp-permissions-list").replaceChildren(...choices);
+    $("mcp-permissions-choices").hidden = !choices.length;
+    permissionControls();
+  }
+
+  $("mcp-read-tools").addEventListener("click", async () => {
+    const data = permission;
+    if (!data || data.busy || !canConfigure()) return;
+    data.busy = true;
+    permissionControls();
+    message(permissionFeedback, "pending", "正在读取工具列表…");
+    try {
+      const { revision, result } = await invoke("verify_mcp", {
+        client: "desktop", destination: data.where, target: { source: "permission", name: data.server.name },
+      });
+      if (revision !== data.server.revision) throw "服务配置已改变，请关闭窗口并刷新后重试。";
+      if ("Err" in result) throw result.Err;
+      const names = result.Ok.tool_names || [];
+      const original = data.server.permissions.always_allow;
+      data.names = new Set([...original, ...names]);
+      data.chosen = new Set([...data.chosen].filter(name => data.names.has(name)));
+      const hint = result.Ok.tool_count > names.length ? " 部分工具名称无法用于权限匹配。" : "";
+      message(permissionFeedback, "success", `已读取 ${names.length} 个可配置的工具。${hint}`);
+      $("mcp-permissions-hint").hidden = !original.length;
+    } catch (error) {
+      message(permissionFeedback, "error", errorText(error));
+    } finally {
+      data.busy = false;
+      renderPermissionChoices();
+    }
+  });
+
+  $("mcp-clear-tools").addEventListener("click", () => {
+    if (!permission || permission.busy) return;
+    permission.chosen.clear();
+    renderPermissionChoices();
+  });
+  $("close-mcp-permissions").addEventListener("click", () => permissionDialog.close());
+  permissionDialog.addEventListener("cancel", event => { if (permission?.busy) event.preventDefault(); });
+  permissionDialog.addEventListener("close", () => { if (!permissionDialog.open) permission = null; });
+  $("mcp-permissions").addEventListener("submit", async event => {
+    event.preventDefault();
+    const data = permission;
+    if (!data || $("save-mcp-permissions").disabled || !canConfigure()) return;
+    data.busy = true;
+    busy = true;
+    permissionControls();
+    controls();
+    try {
+      await invoke("save_mcp_permissions", {
+        destination: data.where, name: data.server.name, revision: data.server.revision,
+        alwaysAllow: [...data.chosen].sort(),
+      });
+      permissionDialog.close();
+      const text = data.chosen.size ? `已保存：${data.server.name} 的 ${data.chosen.size} 项工具始终允许。` : `已清空 Lite 为 ${data.server.name} 设置的授权。`;
+      message(pageFeedback, "success", `${text} 请在当前任务结束后完全退出并重新打开 Claude Desktop。`);
+      await refreshServers();
+      void window.refreshFrameLeap?.();
+    } catch (error) {
+      message(permissionFeedback, "error", errorText(error));
+    } finally {
+      data.busy = false;
+      busy = false;
+      permissionControls();
+      controls();
+    }
+  });
+
+  async function verifyServer(target, show) {
     if (!canConfigure()) return;
     const client = selected;
     const where = target.source === "saved" ? destination() : editorDestination;
-    const name = target.source === "saved" ? target.name : null;
-    const show = (kind, text) => {
-      if (name) checks.set(name, { kind, text });
-      message(feedback, kind, text);
-    };
     busy = true;
     controls();
-    show("pending", "正在验证连接…");
+    show("pending");
     try {
-      const result = await invoke("verify_mcp", { client, destination: where, target });
-      const tools = result.tool_count == null ? "服务未声明工具能力" : `发现 ${result.tool_count} 个工具`;
-      show("success", `验证通过 · ${tools}`);
+      const { revision, result } = await invoke("verify_mcp", { client, destination: where, target });
+      if ("Err" in result) {
+        show("error", result.Err, revision);
+        return;
+      }
+      const count = result.Ok.tool_count;
+      const tools = count == null ? "服务未声明工具能力" : `发现 ${count} 个工具`;
+      show("success", tools, revision);
     } catch (error) {
-      show("error", `验证失败。${errorText(error)}`);
+      show("error", errorText(error));
     } finally {
       busy = false;
       controls();
-      if (name && !feedback.isConnected) renderServers();
     }
   }
 
@@ -823,7 +979,15 @@
   $("verify-mcp").addEventListener("click", () => {
     try {
       const input = formInput();
-      if (input) void verifyServer({ source: "draft", input }, editorFeedback);
+      if (!input) return;
+      void verifyServer({ source: "draft", input }, (kind, detail) => {
+        const text = {
+          pending: "正在验证连接…",
+          success: `${checkLabels.success} · ${detail}`,
+          error: `${checkLabels.error}。${detail}`,
+        }[kind];
+        message(editorFeedback, kind, text);
+      });
     } catch (error) {
       message(editorFeedback, "error", errorText(error));
     }
@@ -875,10 +1039,13 @@
   });
   window.addEventListener("lite:page", event => { if (event.detail === "tools") refresh(); });
   window.addEventListener("lite:refresh", () => {
-    if (lite.page === "tools" && !busy && form.hidden && quickForm.hidden && importForm.hidden) refresh();
+    if (lite.page === "tools" && !busy && !permissionDialog.open && form.hidden && quickForm.hidden && importForm.hidden) refresh();
   });
   window.addEventListener("lite:frameleap-updated", () => {
-    if (selected === "desktop" && !busy) void refreshServers();
+    const invalidated = checkLocation.startsWith("desktop/") && checks.delete("frameleap");
+    if (selected !== "desktop") return;
+    if (!busy) void refreshServers();
+    else if (invalidated) renderServers();
   });
   controls();
 })();

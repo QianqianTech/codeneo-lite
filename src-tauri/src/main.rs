@@ -254,15 +254,17 @@ async fn verify_mcp(
     client: Client,
     destination: mcp::Destination,
     target: mcp::Verification,
-) -> Result<mcp::Check, String> {
+) -> Result<mcp::VerificationResult, String> {
     let resources = mcp_resources(&app)?;
     let (server, location) = work(move || {
         let root = secrets::root()?;
         mcp::migrate_legacy_playwright(&root, client, &destination, &target, &resources)?;
-        mcp::verification_entry(client, destination, target)
+        mcp::verification_entry(&root, client, destination, target)
     })
     .await?;
-    mcp::check(client, server, location.directory.as_deref()).await
+    let revision = mcp::revision(&location.path, &server);
+    let result = mcp::check(client, server, location.directory.as_deref()).await;
+    Ok(mcp::VerificationResult { revision, result })
 }
 
 #[tauri::command]
@@ -272,6 +274,19 @@ async fn save_mcp(
     input: mcp::Input,
 ) -> Result<(), String> {
     work(move || mcp::save(&secrets::root()?, client, destination, input)).await
+}
+
+#[tauri::command]
+async fn save_mcp_permissions(
+    destination: mcp::Destination,
+    name: String,
+    revision: String,
+    always_allow: Vec<String>,
+) -> Result<(), String> {
+    work(move || {
+        mcp::save_permissions(&secrets::root()?, destination, &name, &revision, always_allow)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -527,7 +542,9 @@ fn main() {
             let _ = tray::install(app);
             start_pending_check(app.handle().clone());
             tauri::async_runtime::spawn(async {
-                let _ = gateway::resume().await;
+                if let Err(error) = gateway::resume().await {
+                    claudekeeper_app::diagnostics::record("warn", "gateway-startup", &error);
+                }
             });
             Ok(())
         })
@@ -566,6 +583,7 @@ fn main() {
             get_mcp,
             verify_mcp,
             save_mcp,
+            save_mcp_permissions,
             remove_mcp,
             set_mcp_enabled,
             token_usage,

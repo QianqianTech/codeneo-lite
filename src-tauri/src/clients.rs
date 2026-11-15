@@ -100,7 +100,7 @@ pub(crate) fn allowed(root: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn desktop_managed() -> bool {
+pub(crate) fn desktop_managed() -> bool {
     #[cfg(target_os = "macos")]
     {
         let root = Path::new("/Library/Managed Preferences");
@@ -115,7 +115,7 @@ fn desktop_managed() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn desktop_managed() -> bool {
+pub(crate) fn desktop_managed() -> bool {
     [
         r"HKLM\SOFTWARE\Policies\Claude",
         r"HKCU\SOFTWARE\Policies\Claude",
@@ -511,7 +511,7 @@ pub fn view(root: &Path) -> Result<Value, String> {
     let keyed_accounts: HashMap<_, _> = store
         .accounts
         .iter()
-        .filter(|account| models::key(root, account).is_ok())
+        .filter(|account| models::has_readable_key(root, account))
         .map(|account| (account.id.as_str(), account))
         .collect();
     let accounts: Vec<_> = store
@@ -991,6 +991,9 @@ fn check_launch(root: &Path, client: Client) -> Result<(), String> {
 pub(crate) fn lock_for_launch(root: &Path, client: Client) -> Result<std::fs::File, String> {
     let lock = files::lock(root)?;
     transaction::recover(root, &allowed(root))?;
+    if client == Client::Desktop {
+        crate::mcp::policy::recover(root)?;
+    }
     check_launch(root, client)?;
     Ok(lock)
 }

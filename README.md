@@ -58,7 +58,7 @@ Codex 和适合直连的 Claude Desktop 档案可以选择「直连兼容接口�
 
 ### 一个档案使用多个模型
 
-- **Claude Desktop** 在档案中展开「Claude Desktop 可选模型」。从目录加入或每行填写一个同一接入账号的模型 ID，首行是默认模型。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。应用后重新打开 Claude Desktop，在模型菜单中选择。应用新供应商档案后，可回原会话继续，历史消息会随请求发给当前供应商。旧会话若提示接续授权，可刷新 Lite 中的 Desktop 状态后，点击「恢复与撤销 → 接续旧会话」。
+- **Claude Desktop** 在客户端页点击「配置可选模型」，从服务商目录勾选模型，或在「手动添加模型 ID」里每行输入一个 ID。在已选列表中可移除模型或点击「设为默认」，一次保存到当前档案。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。应用后重新打开 Claude Desktop，在模型菜单中选择。应用新供应商档案后，可回原会话继续，历史消息会随请求发给当前供应商。旧会话若提示接续授权，可刷新 Lite 中的 Desktop 状态后，点击「恢复与撤销 → 接续旧会话」。
 - **Claude Code** 在档案中展开「Claude Code 模型映射」。可分别配置 Opus、Sonnet、Haiku、Fable、快速模型、子 Agent 和推理模型。未填写的角色沿用档案的默认模型。
 - **Codex** 直连档案会将同一账号下已保存的模型写入原生目录，所选档案作为默认模型。Codex 每次启动使用当前配置的一个服务商。Lite 网关使用当前档案对应的模型。
 - **新增 CLI** 在客户端页勾选已保存的模型并指定默认项，再点击「应用模型列表」。Kimi Code CLI 可以填写模型上下文上限。Qwen Code 会选用 OpenAI 兼容认证，恢复原配置时还原认证设置。
@@ -71,9 +71,13 @@ OpenCode、Qwen Code、CodeBuddy Code、Kimi Code 和 Copilot CLI 通过各自�
 2. 从「热门 MCP」选择服务并点「快速配置」。Lite 会选用目标客户端支持的连接方式，有需要时只提示填写 Key、选择目录或在客户端完成登录。Context7、DeepWiki、GitHub、Notion、Playwright 和 Filesystem 已提供预设。
 3. 接入其他服务时，点「粘贴配置」导入单个服务的 JSON、JSONC 或 Codex TOML，检查预填内容后保存；也可以点「添加 MCP」手动填写。Codex、Qwen 等客户端支持的工作目录、超时和工具范围可在表单的高级设置中修改。
 
-Claude Code、Codex、Qwen Code、CodeBuddy Code 和 Kimi Code 可以选择项目共享配置；Claude Code 还支持只在本机当前项目生效的配置。快捷配置在项目共享范围使用环境变量引用 Key。客户端的信任和授权仍在客户端内处理。
+Claude Code、Codex、Qwen Code、CodeBuddy Code 和 Kimi Code 可以选择项目共享配置；Claude Code 还支持只在本机当前项目生效的配置。快捷配置在项目共享范围使用环境变量引用 Key。
 
 「已配置」可以编辑、验证、移除服务或撤销当前配置范围的最近一次变更。保存只写入配置；主动点「验证连接」时，Lite 会发起 MCP 握手并尝试读取工具列表。OAuth 登录或依赖客户端会话的连接，请在目标客户端中验证。
+
+在 Lite 管理的 Claude Desktop 第三方模式下，可在「已配置 → 本地 MCP 服务 → 工具权限」读取并勾选具体工具，再保存为「始终允许」。规则跟随第三方档案，切换其中的模型无需重复设置。等当前任务结束后，完全退出并重新打开 Claude Desktop。需要收回 Lite 写入的授权或修改服务连接时，可先点「清空授权」并保存。
+
+此入口适用于 Playwright、FrameLeap 等使用 `command`、`args`、`env` 的本地 MCP。Lite 使用 Claude Desktop 的[档案工具权限](https://claude.com/docs/third-party/claude-desktop/configuration#tool-permissions-for-managed-mcp-servers)，只允许选中的工具，不开启 Cowork 的全局 Auto 模式。Claude 自己保存的授权仍在原客户端管理。
 
 Playwright 的 MCP 服务及 npm 依赖已随 Lite 打包，快速配置会直接使用内置服务，不再通过 `npx` 下载。验证旧版 Playwright 配置时，Lite 会先将已知的 `npx` 启动方式迁移到内置入口，并保留启动参数、环境变量和高级设置。本机仍需 Node.js 18+ 和可用的浏览器。
 
@@ -85,7 +89,9 @@ CodeNeo Lite 使用 [MIT 许可证](LICENSE)。欢迎为 [MCP 目录](mcp/catalo
 
 ## 用量与参考费用
 
-「用量」从 Claude Desktop、Claude Code、Codex 和已检测到的新增 CLI 的本机记录统计输入、输出及缓存 Token。可按客户端查看最近 24 小时、7 天或 30 天的数据。WorkBuddy 的本机用量来源待确认。新增 CLI 的参考费用需要明确的服务商及匹配的公开单价。
+「用量」从 Claude Desktop、Claude Code、Codex 和已检测到的新增 CLI 的本机记录统计输入、输出及缓存 Token。可按客户端查看最近 24 小时、7 天或 30 天的数据。未能读完整的客户端会在总量旁显示「部分统计」。WorkBuddy 的本机用量来源待确认。新增 CLI 的参考费用需要明确的服务商及匹配的公开单价。
+
+直连和经 CodeNeo Lite 网关的调用都按客户端记录合计。网关转发服务商返回的用量字段；没有写入客户端本机日志的请求不会显示在用量页。
 
 费用按模型厂商公开 API 价估算，统一显示整数人民币，有上下限时取中点。美元单价按 2026-11-12 中间价 1 美元兑 6.7174 元人民币折算。DeepSeek 使用公开峰谷价，百炼使用华北 2（北京）公开价。明细提供价格来源、价格核对日期和汇率来源。订阅、套餐、代理、折扣及工具费用请以实际账单为准。
 

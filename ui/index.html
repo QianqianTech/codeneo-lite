@@ -44,7 +44,12 @@
                 <h2 class="page-title" id="current-client"></h2>
                 <span class="status" id="client-status"></span>
               </div>
-              <button type="button" class="icon-button" id="refresh-clients" title="刷新状态" aria-label="刷新状态"><span class="icon icon-refresh" aria-hidden="true"></span></button>
+              <button type="button" class="icon-button" id="refresh-clients" title="刷新状态" aria-label="刷新状态">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M18 18a8.5 8.5 0 1 1 0-12l2 2M20 3v5h-5"/>
+                </svg>
+              </button>
             </header>
             <div id="client-detail" hidden>
               <section aria-labelledby="current-client">
@@ -147,9 +152,9 @@
           </div>
         </section>
 
-        <form class="model-editor" id="model-form" autocomplete="off" novalidate hidden>
+        <form class="model-editor" id="model-form" aria-labelledby="form-title" autocomplete="off" novalidate hidden>
           <div class="section-heading editor-heading">
-            <div><h2 id="form-title">添加模型</h2><p id="editor-target" class="muted"></p><code id="editor-picked" hidden></code></div>
+            <div><h2 id="form-title">添加模型</h2><p id="editor-target" class="muted" hidden></p></div>
             <button class="secondary" type="button" id="close-model">返回模型库</button>
           </div>
           <ol class="setup-steps" aria-label="模型配置步骤">
@@ -157,8 +162,10 @@
             <li data-step="selection">选择模型</li>
           </ol>
           <section id="connection-step" aria-label="接入服务">
-            <label class="field" id="provider-field">服务商<select id="provider-picker"></select></label>
-            <label class="field" id="account-field">接入账号<select id="account-picker"></select></label>
+            <div class="fields connection-choices">
+              <label class="field" id="provider-field">服务商<select id="provider-picker"></select></label>
+              <label class="field" id="account-field">接入账号<select id="account-picker"></select></label>
+            </div>
             <div id="connection-details" class="fields" hidden>
               <label class="field">接口地址（Base URL）<input id="provider-url" spellcheck="false" placeholder="https://api.example.com/v1"></label>
               <label class="field" id="protocol-field">接口协议<select id="provider-protocol">
@@ -178,33 +185,52 @@
             </details>
           </section>
 
-          <section id="selection-step" aria-label="选择模型" hidden>
-            <div class="section-heading catalog-heading">
-              <div><h3>服务商模型列表</h3><p id="catalog-source" class="muted"></p></div>
-              <button type="button" class="secondary" id="refresh-catalog">重新加载</button>
+          <section id="selection-step" class="model-selection" aria-label="选择模型" hidden>
+            <section class="selection-panel" aria-labelledby="catalog-title">
+              <div class="section-heading selection-panel-heading">
+                <div><h3 id="catalog-title">服务商模型列表</h3><p id="catalog-source" class="muted" role="status"></p></div>
+                <button type="button" class="secondary" id="refresh-catalog">拉取账号目录</button>
+              </div>
+              <div class="catalog-body">
+                <label class="search"><span class="sr-only">搜索可选模型</span><input type="search" id="candidate-search" placeholder="搜索名称或模型 ID" spellcheck="false" aria-controls="candidate-list"></label>
+                <div class="candidate-list" id="candidate-list" role="group" aria-label="可选模型"></div>
+              </div>
+            </section>
+            <div class="selection-settings">
+              <section class="selection-panel" id="selected-models" aria-labelledby="selected-title" hidden>
+                <div class="section-heading selection-panel-heading">
+                  <h3 id="selected-title">已选模型</h3><span id="selected-count" class="muted" role="status"></span>
+                </div>
+                <p id="selected-empty" class="muted" hidden></p>
+                <ul class="selected-model-list" id="selected-model-list" role="list"></ul>
+                <details id="manual-models">
+                  <summary>手动添加模型 ID</summary>
+                  <label class="field"><span class="sr-only">模型 ID（每行一个）</span><textarea id="manual-model-ids" rows="2" spellcheck="false" placeholder="每行一个模型 ID"></textarea></label>
+                  <button type="button" class="secondary" id="add-manual-model">加入列表</button>
+                </details>
+              </section>
+              <div class="profile-fields">
+                <div id="model-id-field" hidden>
+                  <label class="field" for="model-id"><span id="model-id-label">模型 ID</span><input id="model-id" maxlength="256" spellcheck="false" list="code-model-catalog" aria-describedby="profile-model-help" placeholder="选择或填写模型 ID"></label>
+                  <p class="muted field-help" id="profile-model-help" hidden>用于 Claude Code 等客户端。Desktop 模型在上方设置。</p>
+                </div>
+                <label class="field" for="model-name">档案名称（可选）<input id="model-name" maxlength="96" placeholder="默认使用模型名称"></label>
+              </div>
             </div>
-            <label class="search"><span class="sr-only">搜索可选模型</span><input type="search" id="candidate-search" placeholder="按名称或模型 ID 搜索"></label>
-            <div class="candidate-list" id="candidate-list" role="group" aria-label="可选模型"></div>
-            <details id="selected-models" hidden>
-              <summary id="selected-count"></summary>
-              <ul class="selected-model-list" id="selected-model-list"></ul>
-            </details>
-            <div class="fields selection-fields">
-              <label class="field" for="model-id"><span id="model-id-label">模型 ID</span><input id="model-id" maxlength="256" spellcheck="false" placeholder="从上面选择，或粘贴模型 ID"></label>
-              <label class="field" for="model-name">显示名称（可选）<input id="model-name" maxlength="96" placeholder="默认使用模型名称"></label>
+            <div class="selection-options">
+              <details class="model-options" id="desktop-model-options" hidden>
+                <summary>Claude Desktop 模型列表</summary>
+                <p class="muted field-help" id="desktop-model-help">将模型列表附加到默认档案，首行用作 Claude Desktop 的默认模型。</p>
+                <label class="field" for="desktop-model-list">Desktop 模型 ID<textarea id="desktop-model-list" rows="3" spellcheck="false" aria-describedby="desktop-model-help" placeholder="每行一个模型 ID"></textarea></label>
+                <button type="button" class="secondary" id="add-desktop-candidate">加入已勾选的模型</button>
+              </details>
+              <details class="model-options" id="code-model-options" hidden>
+                <summary>Claude Code 模型映射</summary>
+                <p class="muted field-help">为各角色填入同一账号的模型 ID。留空时使用默认设置。</p>
+                <div class="fields" id="code-model-fields"></div>
+                <datalist id="code-model-catalog"></datalist>
+              </details>
             </div>
-            <details class="model-options" id="desktop-model-options" hidden>
-              <summary>Claude Desktop 可选模型</summary>
-              <p class="muted field-help" id="desktop-model-help">每行一个模型 ID，首行是默认模型。通过 CodeNeo Lite网关应用后，可在 Claude Desktop 的模型菜单中切换。</p>
-              <label class="field" for="desktop-model-list">Desktop 模型列表<textarea id="desktop-model-list" rows="4" spellcheck="false" aria-describedby="desktop-model-help" placeholder="qwen3.8-max&#10;qwen3.8-flash"></textarea></label>
-              <button type="button" class="secondary" id="add-desktop-candidate" hidden>将所选模型加入 Desktop 列表</button>
-            </details>
-            <details class="model-options" id="code-model-options" hidden>
-              <summary>Claude Code 模型映射</summary>
-              <p class="muted field-help">为各角色填入同一账号的模型 ID。留空时使用默认设置。</p>
-              <div class="fields" id="code-model-fields"></div>
-              <datalist id="code-model-catalog"></datalist>
-            </details>
           </section>
           <div class="editor-footer">
             <p class="feedback" id="editor-feedback" role="status" hidden></p>
@@ -214,9 +240,10 @@
             </div>
             <div class="button-row" id="selection-actions" hidden>
               <button type="button" class="text-button" id="back-to-connection">← 上一步</button>
-              <div class="spacer"></div>
-              <button type="button" class="secondary" id="probe-model">测试连接</button>
-              <button type="submit" class="primary" id="save-model">保存模型</button>
+              <div class="button-row editor-commit">
+                <button type="button" class="secondary" id="probe-model">测试连接</button>
+                <button type="submit" class="primary" id="save-model">保存档案</button>
+              </div>
             </div>
           </div>
         </form>
@@ -360,6 +387,7 @@
                 <div><dt id="usage-total-label">Token 总量</dt><dd class="usage-hero-value usage-token" id="usage-total">—</dd></div>
                 <div class="usage-input-summary"><dt>输入（含缓存）</dt><dd class="usage-token" id="usage-input">—</dd></div>
               </dl>
+              <p id="usage-partial" role="status" hidden></p>
               <div class="usage-mix" id="usage-mix" aria-hidden="true">
                 <span class="usage-uncached" id="usage-mix-uncached"></span>
                 <span class="usage-cache-read" id="usage-mix-cache-read"></span>
@@ -374,9 +402,9 @@
               </dl>
             </section>
             <dl class="usage-estimate">
-              <dt>参考费用 · 人民币</dt>
+              <dt>公开 API 估价 · 人民币</dt>
               <dd class="usage-hero-value" id="usage-cost">—</dd>
-              <dd class="muted" id="usage-cost-caption">按公开 API 价估算</dd>
+              <dd class="muted" id="usage-cost-caption">仅估算已统计且有公开单价的记录</dd>
               <dd id="usage-cost-note" hidden></dd>
             </dl>
           </div>
@@ -391,7 +419,7 @@
                   <th role="columnheader" scope="col">缓存读</th>
                   <th role="columnheader" scope="col">缓存写</th>
                   <th role="columnheader" scope="col">输出</th>
-                  <th role="columnheader" scope="col">参考费用</th>
+                  <th role="columnheader" scope="col">API 估价</th>
                 </tr></thead>
                 <tbody id="usage-rows" role="rowgroup"></tbody>
               </table>
@@ -401,7 +429,7 @@
               <p class="muted" id="usage-coverage" hidden></p>
               <details class="usage-pricing">
                 <summary>计价说明 <span id="usage-pricing-date"></span></summary>
-                <p class="muted">参考费用按模型公开 API 价估算，有上下限时取中点，金额按元显示。订阅、套餐、折扣及工具费用以实际账单为准。</p>
+                <p class="muted">按模型公开 API 价估算，有上下限时取中点，金额按元显示。实际费用和订阅用量请查看服务商账单。</p>
                 <p class="muted" id="usage-exchange"></p>
               </details>
             </div>
@@ -410,6 +438,27 @@
       </section>
     </main>
   </div>
+  <dialog id="mcp-permissions-dialog" aria-labelledby="mcp-permissions-title" aria-describedby="mcp-permissions-note">
+    <form id="mcp-permissions">
+      <h2 id="mcp-permissions-title">工具权限</h2>
+      <p id="mcp-permissions-note" class="muted">勾选的工具在 Claude Cowork 中可直接运行，无需逐次确认。权限适用于这个第三方档案下的所有模型，重开 Claude Desktop 后生效。</p>
+      <div class="button-row mcp-permissions-toolbar">
+        <button type="button" class="secondary" id="mcp-read-tools">读取工具列表</button>
+        <button type="button" class="text-button" id="mcp-clear-tools">清空授权</button>
+        <span class="muted" id="mcp-permissions-count" aria-live="polite"></span>
+      </div>
+      <fieldset id="mcp-permissions-choices" class="mcp-parameters" hidden>
+        <legend>始终允许</legend>
+        <div id="mcp-permissions-list"></div>
+      </fieldset>
+      <p class="muted" id="mcp-permissions-hint"></p>
+      <p class="feedback" id="mcp-permissions-feedback" role="status" hidden></p>
+      <div class="button-row form-actions">
+        <button type="button" class="secondary" id="close-mcp-permissions" autofocus>取消</button>
+        <button type="submit" class="primary" id="save-mcp-permissions">保存权限</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="restart-dialog" aria-labelledby="restart-title" aria-describedby="restart-description">
     <form method="dialog">
       <h2 id="restart-title"></h2>

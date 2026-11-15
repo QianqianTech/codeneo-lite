@@ -21,9 +21,8 @@ mod agents;
 #[path = "usage_logs.rs"]
 mod logs;
 
-const MAX_FILES: usize = 1500;
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LINE: u64 = 2 * 1024 * 1024;
+const MAX_CACHED_FILES: usize = 1500;
 const MAX_CACHED_RECORDS: usize = 50_000;
 const RECORD_MARKERS: &[&[u8]] = &[
     b"\"usage\"",
@@ -156,33 +155,38 @@ impl LogMetadata {
 fn collect_logs(
     dir: &Path,
     cutoff: SystemTime,
-    depth: u8,
     files: &mut BTreeMap<PathBuf, LogMetadata>,
 ) -> bool {
-    let listing = match fs::read_dir(dir) {
-        Ok(listing) => listing,
-        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
-    };
+    let mut directories = vec![dir.to_path_buf()];
     let mut complete = true;
-    for item in listing {
-        let Ok(item) = item else {
-            complete = false;
-            continue;
+    while let Some(dir) = directories.pop() {
+        let listing = match fs::read_dir(dir) {
+            Ok(listing) => listing,
+            Err(error) => {
+                complete &= error.kind() == std::io::ErrorKind::NotFound;
+                continue;
+            }
         };
-        let Ok(kind) = item.file_type() else {
-            complete = false;
-            continue;
-        };
-        let path = item.path();
-        if kind.is_dir() && depth > 0 {
-            complete &= collect_logs(&path, cutoff, depth - 1, files);
-        } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
-            let Ok(meta) = item.metadata().and_then(LogMetadata::from_metadata) else {
+        for item in listing {
+            let Ok(item) = item else {
                 complete = false;
                 continue;
             };
-            if meta.modified >= cutoff {
-                files.insert(path, meta);
+            let Ok(kind) = item.file_type() else {
+                complete = false;
+                continue;
+            };
+            let path = item.path();
+            if kind.is_dir() {
+                directories.push(path);
+            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+                let Ok(meta) = item.metadata().and_then(LogMetadata::from_metadata) else {
+                    complete = false;
+                    continue;
+                };
+                if meta.modified >= cutoff {
+                    files.insert(path, meta);
+                }
             }
         }
     }
@@ -197,20 +201,11 @@ fn scan_log_files(
     let mut files = BTreeMap::new();
     let mut complete = true;
     for dir in roots {
-        complete &= collect_logs(dir, cutoff, 7, &mut files);
+        complete &= collect_logs(dir, cutoff, &mut files);
     }
     let mut files: Vec<_> = files.into_iter().collect();
     files.sort_unstable_by_key(|(_, meta)| std::cmp::Reverse(meta.modified));
-    let mut remaining = MAX_BYTES;
-    for (index, (path, meta)) in files.into_iter().enumerate() {
-        if index >= MAX_FILES {
-            return false;
-        }
-        if meta.size > remaining {
-            complete = false;
-            continue;
-        }
-        remaining -= meta.size;
+    for (path, meta) in files {
         complete &= parse(&path, meta);
     }
     complete
@@ -229,7 +224,12 @@ struct LogRead {
     metadata: Option<LogMetadata>,
 }
 
-fn read_records(path: &Path, size: u64, mut consume: impl FnMut(&[u8])) -> LogRead {
+fn read_records(
+    path: &Path,
+    size: u64,
+    skip_large: impl Fn(&[u8]) -> bool,
+    mut consume: impl FnMut(&[u8]),
+) -> LogRead {
     let failed = LogRead {
         complete: false,
         metadata: None,
@@ -261,8 +261,9 @@ fn read_records(path: &Path, size: u64, mut consume: impl FnMut(&[u8])) -> LogRe
             return failed;
         };
         if buffer.is_empty() {
+            let file = reader.get_ref();
+            complete &= file.limit() == 0;
             let metadata = metadata.filter(|metadata| {
-                let file = reader.get_ref();
                 file.limit() == 0
                     && file
                         .get_ref()
@@ -278,6 +279,12 @@ fn read_records(path: &Path, size: u64, mut consume: impl FnMut(&[u8])) -> LogRe
             reader.consume(len);
             continue;
         }
+        if skip_large(buffer) {
+            if reader.skip_until(b'\n').is_err() {
+                return failed;
+            }
+            continue;
+        }
         match (&mut reader)
             .take(MAX_LINE + 1)
             .read_until(b'\n', &mut line)
@@ -286,7 +293,7 @@ fn read_records(path: &Path, size: u64, mut consume: impl FnMut(&[u8])) -> LogRe
                 if line.last() != Some(&b'\n') && reader.skip_until(b'\n').is_err() {
                     return failed;
                 }
-                complete = false;
+                complete &= skip_large(&line);
             }
             Ok(_) => consume(&line),
             Err(_) => return failed,
@@ -296,13 +303,18 @@ fn read_records(path: &Path, size: u64, mut consume: impl FnMut(&[u8])) -> LogRe
 
 fn records(path: &Path, size: u64, mut consume: impl FnMut(Value)) -> bool {
     let markers: Vec<_> = RECORD_MARKERS.iter().map(Finder::new).collect();
-    read_records(path, size, |line| {
-        if markers.iter().any(|marker| marker.find(line).is_some()) {
-            if let Ok(record) = serde_json::from_slice(line) {
-                consume(record);
+    read_records(
+        path,
+        size,
+        |_| false,
+        |line| {
+            if markers.iter().any(|marker| marker.find(line).is_some()) {
+                if let Ok(record) = serde_json::from_slice(line) {
+                    consume(record);
+                }
             }
-        }
-    })
+        },
+    )
     .complete
 }
 
@@ -357,37 +369,45 @@ fn scan_cached<T>(
     let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut previous = std::mem::take(&mut *cache);
+    let mut remaining = MAX_CACHED_RECORDS;
+    let mut keep = |path: PathBuf, entry: CachedLog<T>| {
+        let records = entry.parsed.usage.len().max(1);
+        if records <= remaining && cache.len() < MAX_CACHED_FILES {
+            remaining -= records;
+            cache.insert(path, entry);
+        }
+    };
+    // The cache budget limits retained records, never the files included in the report.
     let complete = scan_log_files(dirs, cutoff, |path, metadata| {
-        if let Some(entry) = cache.get(path).filter(|entry| entry.metadata == metadata) {
+        if let Some((path, entry)) = previous
+            .remove_entry(path)
+            .filter(|(_, entry)| entry.metadata == metadata)
+        {
             consume(&entry.parsed.usage);
-            return entry.parsed.read.complete;
+            let complete = entry.parsed.read.complete;
+            keep(path, entry);
+            return complete;
         }
 
-        cache.remove(path);
         let parsed = parse(path, metadata.size);
         consume(&parsed.usage);
         let complete = parsed.read.complete;
         if parsed.read.metadata == Some(metadata)
-            && parsed.usage.len() <= MAX_CACHED_RECORDS
             && path.symlink_metadata().is_ok_and(|current| {
                 current.is_file()
                     && LogMetadata::from_metadata(current).is_ok_and(|current| current == metadata)
             })
         {
-            cache.insert(path.to_path_buf(), CachedLog { metadata, parsed });
+            keep(path.to_path_buf(), CachedLog { metadata, parsed });
         }
         complete
     });
     // Keep other ranges warm within a fixed record budget.
-    let mut entries: Vec<_> = std::mem::take(&mut *cache).into_iter().collect();
+    let mut entries: Vec<_> = previous.into_iter().collect();
     entries.sort_unstable_by_key(|(_, entry)| std::cmp::Reverse(entry.metadata.modified));
-    let mut remaining = MAX_CACHED_RECORDS;
     for (path, entry) in entries {
-        let records = entry.parsed.usage.len().max(1);
-        if records <= remaining && cache.len() < MAX_FILES {
-            remaining -= records;
-            cache.insert(path, entry);
-        }
+        keep(path, entry);
     }
     complete
 }
@@ -435,6 +455,42 @@ fn add_usage(
     }
 }
 
+fn scan_codex(
+    cache: &UsageCache,
+    dirs: &[PathBuf],
+    cutoff: SystemTime,
+    rows: &mut BTreeMap<String, Row>,
+) -> bool {
+    let cutoff_time = OffsetDateTime::from(cutoff);
+    let mut seen = HashSet::new();
+    scan_cached(&cache.codex, dirs, cutoff, logs::codex, |usage| {
+        for record in usage {
+            if let Some(id) = &record.id {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+            }
+            if record.time.is_some_and(|time| time >= cutoff_time) {
+                add(rows, Client::Codex, &record.model, record.tokens);
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn codex_usage_fixture(dir: &Path) -> Vec<(String, Tokens)> {
+    let mut rows = BTreeMap::new();
+    assert!(scan_codex(
+        &UsageCache::default(),
+        &[dir.to_path_buf()],
+        SystemTime::UNIX_EPOCH,
+        &mut rows,
+    ));
+    rows.into_values()
+        .map(|row| (row.model, row.tokens))
+        .collect()
+}
+
 pub fn summarize(
     days: u8,
     visible_agents: &[Client],
@@ -448,7 +504,6 @@ pub fn summarize(
     let cutoff_time = OffsetDateTime::from(cutoff);
     let mut rows = Vec::new();
     let mut coverage = Vec::new();
-    let mut seen_codex = HashSet::new();
     let mut seen_claude = HashSet::new();
     let store = crate::secrets::root()
         .ok()
@@ -476,18 +531,7 @@ pub fn summarize(
         }
         let dirs = roots(client);
         let complete = if client == Client::Codex {
-            scan_cached(&cache.codex, &dirs, cutoff, logs::codex, |usage| {
-                for record in usage {
-                    if let Some(id) = &record.id {
-                        if !seen_codex.insert(id.clone()) {
-                            continue;
-                        }
-                    }
-                    if record.time.is_some_and(|time| time >= cutoff_time) {
-                        add(&mut client_rows, client, &record.model, record.tokens);
-                    }
-                }
-            })
+            scan_codex(cache, &dirs, cutoff, &mut client_rows)
         } else {
             let mut by_message = HashMap::<String, (String, Tokens)>::new();
             let complete = scan_cached(&cache.claude, &dirs, cutoff, logs::claude, |usage| {
@@ -540,8 +584,42 @@ mod tests {
 
     fn read_test_log(path: &Path, size: u64) -> logs::Parsed<Vec<u8>> {
         let mut usage = Vec::new();
-        let read = read_records(path, size, |line| usage.push(line.to_vec()));
+        let read = read_records(path, size, |_| false, |line| usage.push(line.to_vec()));
         logs::Parsed { usage, read }
+    }
+
+    #[test]
+    fn scans_deep_logs_and_all_files_even_with_large_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut nested = root.to_path_buf();
+        for _ in 0..9 {
+            nested.push("subagents");
+        }
+        fs::create_dir_all(&nested).unwrap();
+        let deep = nested.join("nested-session.jsonl");
+        fs::write(&deep, b"usage\n").unwrap();
+        let large = root.join("large-session.jsonl");
+        fs::File::create(&large)
+            .unwrap()
+            .set_len(256 * 1024 * 1024 + 1)
+            .unwrap();
+        for index in 0..1_500 {
+            fs::File::create(root.join(format!("session-{index}.jsonl"))).unwrap();
+        }
+
+        let mut scanned = HashSet::new();
+        assert!(scan_logs(
+            &[root.to_path_buf(), nested],
+            SystemTime::UNIX_EPOCH,
+            |path, _| {
+                assert!(scanned.insert(path.to_path_buf()));
+                true
+            }
+        ));
+        assert_eq!(scanned.len(), 1_502);
+        assert!(scanned.contains(&deep));
+        assert!(scanned.contains(&large));
     }
 
     #[test]

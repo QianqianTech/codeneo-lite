@@ -437,6 +437,52 @@ pub fn can_undo_mcp(root: &Path, client: Client, slot: Option<&str>, config: &Pa
         .is_some_and(|delta| delta.at(config))
 }
 
+pub(crate) fn can_undo_mcp_profile(root: &Path, paths: &[PathBuf]) -> bool {
+    read_journal(root, &mcp_record(root, Client::Desktop, None))
+        .ok()
+        .flatten()
+        .is_some_and(|journal| journal.client == Client::Desktop && validate(&journal, paths).is_ok())
+}
+
+pub(crate) fn undo_mcp_profile(root: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    let path = mcp_record(root, Client::Desktop, None);
+    let mut journal = read_journal(root, &path)?.ok_or("没有可撤销的工具权限变更")?;
+    if journal.client != Client::Desktop {
+        return Err("工具权限撤销记录不属于 Claude Desktop".into());
+    }
+    validate(&journal, paths)?;
+    reverse(&mut journal.deltas);
+    commit_mcp_profile(root, journal.deltas, paths)?;
+    fs::remove_file(path).map_err(|_| "已恢复 MCP 配置，无法清理撤销记录".into())
+}
+
+pub(crate) fn mcp_profile_pending(root: &Path) -> PathBuf {
+    root.join("mcp-profile-pending.bin")
+}
+
+pub(crate) fn recover_mcp_profile(root: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    recover_at(root, paths, &mcp_profile_pending(root), |_| {
+        // The MCP history may still contain an older, single-file change.
+        Ok(vault::read(root, &mcp_record(root, Client::Desktop, None))?
+            .and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok()))
+    })
+}
+
+pub(crate) fn commit_mcp_profile(
+    root: &Path,
+    deltas: Vec<Delta>,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    commit_at(
+        root,
+        Client::Desktop,
+        deltas,
+        paths,
+        &mcp_profile_pending(root),
+        &mcp_record(root, Client::Desktop, None),
+    )
+}
+
 pub fn undo_mcp(root: &Path, client: Client, slot: Option<&str>, config: &Path) -> Result<(), String> {
     let path = mcp_record(root, client, slot);
     let bytes = vault::read(root, &path)?.ok_or("没有可撤销的 MCP 变更")?;
@@ -450,24 +496,33 @@ pub fn undo_mcp(root: &Path, client: Client, slot: Option<&str>, config: &Path) 
 
 fn read_journal(root: &Path, path: &Path) -> Result<Option<Journal>, String> {
     vault::read(root, path)?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| "本机模型切换记录无效".into()))
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| "本机配置变更记录无效".into()))
         .transpose()
 }
 
 pub fn recover(root: &Path, paths: &[PathBuf]) -> Result<(), String> {
-    let pending = pending_file(root);
-    let Some(journal) = read_journal(root, &pending)? else {
+    recover_at(root, paths, &pending_file(root), |client| {
+        read_journal(root, &client.backup(root))
+    })
+}
+
+fn recover_at(
+    root: &Path,
+    paths: &[PathBuf],
+    pending: &Path,
+    record: impl FnOnce(Client) -> Result<Option<Journal>, String>,
+) -> Result<(), String> {
+    let Some(journal) = read_journal(root, pending)? else {
         return Ok(());
     };
     validate(&journal, paths)?;
-    let committed = read_journal(root, &journal.client.backup(root))?
-        .is_some_and(|saved| saved.id == journal.id);
+    let committed = record(journal.client)?.is_some_and(|saved| saved.id == journal.id);
     if !committed {
         for delta in journal.deltas.iter().rev() {
             apply(delta, true)?;
         }
     }
-    fs::remove_file(pending).map_err(|_| "无法清理本机模型切换记录".into())
+    fs::remove_file(pending).map_err(|_| "无法清理本机配置变更记录".into())
 }
 
 pub fn commit(
@@ -475,6 +530,24 @@ pub fn commit(
     client: Client,
     deltas: Vec<Delta>,
     paths: &[PathBuf],
+) -> Result<(), String> {
+    commit_at(
+        root,
+        client,
+        deltas,
+        paths,
+        &pending_file(root),
+        &client.backup(root),
+    )
+}
+
+fn commit_at(
+    root: &Path,
+    client: Client,
+    deltas: Vec<Delta>,
+    paths: &[PathBuf],
+    pending: &Path,
+    backup: &Path,
 ) -> Result<(), String> {
     if deltas.is_empty() {
         return Ok(());
@@ -486,20 +559,19 @@ pub fn commit(
     };
     validate(&journal, paths)?;
     let record = json_bytes(&journal)?;
-    let pending = pending_file(root);
-    vault::write(root, &pending, &record)?;
+    vault::write(root, pending, &record)?;
     let mut applied = Vec::new();
     let result = (|| {
         for delta in &journal.deltas {
             apply(delta, false)?;
             applied.push(delta);
         }
-        vault::write(root, &client.backup(root), &record)
+        vault::write(root, backup, &record)
     })();
     if let Err(error) = result {
         for delta in applied.into_iter().rev() {
             if apply(delta, true).is_err() {
-                return Err("模型切换中断，部分字段等待恢复。请检查模型管理状态".into());
+                return Err("配置变更中断，部分字段等待恢复。请刷新后检查配置".into());
             }
         }
         let _ = fs::remove_file(pending);
@@ -516,13 +588,17 @@ pub fn can_undo(root: &Path, client: Client) -> bool {
 pub fn prepare_undo(root: &Path, client: Client, paths: &[PathBuf]) -> Result<Vec<Delta>, String> {
     let mut journal = read_journal(root, &client.backup(root))?.ok_or("没有可以撤销的切换")?;
     validate(&journal, paths)?;
-    journal.deltas.reverse();
-    for delta in &mut journal.deltas {
+    reverse(&mut journal.deltas);
+    Ok(journal.deltas)
+}
+
+fn reverse(deltas: &mut [Delta]) {
+    deltas.reverse();
+    for delta in deltas {
         for edit in &mut delta.edits {
             std::mem::swap(&mut edit.before, &mut edit.after);
         }
     }
-    Ok(journal.deltas)
 }
 
 pub(crate) fn restored_gateway_port(delta: &Delta, state: &Path, client: Client) -> Option<u16> {

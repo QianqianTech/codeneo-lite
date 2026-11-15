@@ -54,7 +54,7 @@ async function main() {
         ['kimi', 'Kimi Code', 'https://api.kimi.com/coding', ['k3', 'k3.1-pro', 'k3.1-pro-highspeed', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], ['desktop', 'code']],
         ['openrouter', 'OpenRouter', 'https://openrouter.ai/api', ['anthropic/claude-sonnet-5.5', 'fixture/' + 'long-model-id-'.repeat(16) + 'v1'], clients.map(client => client.id)],
         ['glm', '智谱 GLM', 'https://open.bigmodel.cn/api/anthropic', ['glm-5.3', 'glm-5.3-flash'], ['desktop', 'code']],
-        ['qwen', '通义千问', 'https://example.invalid/anthropic', ['qwen3.8-max', 'qwen3.8-flash', 'auto'], ['desktop', 'code']],
+        ['qwen', '通义千问', 'https://example.invalid/anthropic', ['qwen3.8-max', 'qwen3.8-flash', 'deepseek-v4.1-flash-1017', 'auto'], ['desktop', 'code']],
         ['openai', 'OpenAI API', 'https://api.openai.com/v1', ['gpt-6.1-sol'], ['codex', 'workbuddy']],
         ['custom', '自定义兼容接口', '', [], clients.map(client => client.id)],
       ].map(([id, name, base_url, models, clients]) => ({ id, provider: id, name, base_url, auth: 'auth_token',
@@ -72,13 +72,15 @@ async function main() {
         const id = preset.models[1];
         view.models.push({ id: 'long-profile', account: 'openrouter-account', name: '长名称模型', model: id, clients: preset.clients });
       };
-      const mcp = { 'desktop/user': [{ name: 'frameleap', transport: 'stdio', enabled: true }] };
+      const mcp = { 'desktop/user': [{ name: 'frameleap', transport: 'stdio', enabled: true, permissions: { always_allow: [] } }] };
       clients[2].mcp_scopes = ['user', 'project'];
       const mcpConfigs = new Map();
+      mcpConfigs.set('desktop/user/frameleap', { endpoint: '/fixture/frameleap', revision: 'frameleap-fixture' });
       const mcpUndo = new Map();
       let mcpRevision = 0;
       window.mcpWrites = [];
       window.mcpChecks = 0;
+      window.permissionWrites = [];
       window.prepareAgentModels = () => {
         const clients = ['qwen', 'opencode'];
         view.accounts.push({ id: 'fixture-account', name: 'Fixture Provider', has_key: true, clients });
@@ -137,6 +139,10 @@ async function main() {
             throw '请填写 API Key';
           }
           window.catalogAccount = args.input.account_id;
+          if (args.input.preset === 'qwen') {
+            if (!window.qwenCatalogAvailable) throw '认证失败，请检查 API 密钥及所属平台（HTTP 401）';
+            return { models: [{ id: 'qwen3.8-flash', name: '千问轻量版' }, { id: 'qwen3.8-max', name: '千问旗舰版' }] };
+          }
           if (args.input.preset === 'deepseek') {
             return { models: [{ id: 'deepseek-flash', name: 'DeepSeek Flash' }, { id: 'deepseek-v4-pro', name: 'DeepSeek Pro' },
               ...Array.from({ length: 151 }, (_, index) => ({ id: `fixture-model-${index}`, name: `Fixture ${index}` }))] };
@@ -145,6 +151,7 @@ async function main() {
         }
         if (command === 'test_model') {
           if (args.client !== 'desktop') throw '错误的客户端';
+          window.probedModel = args.input.model;
           return { healthy: true, message: '模型调用通过', latency_ms: 42 };
         }
         if (command === 'save_model' || command === 'save_models') {
@@ -164,6 +171,7 @@ async function main() {
             saved.desktop_direct = desktopModels.every(id => /^(anthropic\/)?claude-/i.test(id));
           }
           view.models = [...view.models.filter(model => model.id !== id), saved];
+          if (args.input.id) window.editedProfile = { id, model: saved.model, desktopModels: saved.desktop_models };
           if (command === 'save_model') return id;
           window.batchSaves = [...(window.batchSaves || []), {
             account: account.id, client: args.client, models: [saved.model, ...args.selected.map(entry => entry.model)],
@@ -237,8 +245,11 @@ async function main() {
           const { scope, directory } = args.selection;
           const id = [client.id, scope, directory].filter(Boolean).join('/');
           const configPath = scope === 'project' ? directory + '/.codex/config.toml' : '/fixture/' + client.id + '/mcp-config';
+          const servers = (mcp[id] || []).map(server => ({
+            ...server, revision: mcpConfigs.get(`${id}/${server.name}`)?.revision,
+          }));
           return { location: id, label: scope === 'project' ? '项目共享' : client.id === 'desktop' ? '第三方模型模式' : '用户级',
-            path: configPath, can_undo: mcpUndo.has(id), servers: structuredClone(mcp[id] || []) };
+            path: configPath, can_undo: mcpUndo.has(id), servers };
         }
         if (command === 'frameleap_status') return { mode: 'gateway', state: 'existing' };
         const destination = args?.destination?.location;
@@ -247,11 +258,23 @@ async function main() {
         }
         if (command === 'verify_mcp') {
           const { source, name, input } = args.target;
-          const config = source === 'saved' ? mcpConfigs.get(`${destination}/${name}`) : input;
+          const config = source === 'draft' ? input : mcpConfigs.get(`${destination}/${name}`);
           window.mcpChecks++;
           await new Promise(resolve => setTimeout(resolve, 150));
-          if (!config || config.endpoint.endsWith('/denied')) throw 'MCP 认证失败（HTTP 401），请检查凭据或服务权限';
-          return { protocol_version: '2025-11-25', tool_count: 3 };
+          if (!config) throw '找不到此 MCP 服务，请刷新列表';
+          const result = config.endpoint.endsWith('/denied')
+            ? { Err: 'MCP 认证失败（HTTP 401），请检查凭据或服务权限' }
+            : { Ok: { protocol_version: '2025-11-25', tool_count: 3, tool_names: ['list_projects', 'get_project', 'render_video'] } };
+          return { revision: config.revision, result };
+        }
+        if (command === 'save_mcp_permissions') {
+          const config = mcpConfigs.get(`${destination}/${args.name}`);
+          if (config?.revision !== args.revision) throw '服务配置已变化';
+          const server = mcp[destination].find(item => item.name === args.name);
+          server.permissions.always_allow = args.alwaysAllow;
+          config.revision = String(++mcpRevision);
+          window.permissionWrites.push(args.alwaysAllow);
+          return null;
         }
         if (command === 'save_mcp') {
           const { name, transport, revision } = args.input;
@@ -309,7 +332,8 @@ async function main() {
                 estimate: { low_cny: 0.01225, high_cny: 0.0123, source: 'qwen_max' } },
               { client: 'code', model: 'glm-5.3', tokens: { input: 70, output: 10, cache_read: 0, cache_write: 0, cache_write_long: 0 }, estimate: null },
             ],
-            coverage: clients.map(({ id }) => ({ client: id, state: id === 'workbuddy' ? 'unsupported' : args.days === 1 ? 'empty' : 'available' })),
+            coverage: clients.map(({ id }) => ({ client: id, state: id === 'workbuddy' ? 'unsupported'
+              : args.days === 1 ? 'empty' : args.days === 30 && id === 'codex' ? 'partial' : 'available' })),
           };
         }
         throw new Error('Unexpected operation ' + command);
@@ -384,6 +408,39 @@ async function main() {
     assert.equal(await page.locator('#candidate-list [data-model]').count(), 0);
     await page.getByRole('button', { name: '返回模型库', exact: true }).click();
     assert.equal(await page.locator('#add-first-model').evaluate(control => document.activeElement === control), true);
+
+    await page.locator('#add-first-model').click();
+    await page.locator('#provider-picker').selectOption('qwen');
+    await key.fill('sk-sp-fixture-only');
+    await page.getByRole('button', { name: '加载模型列表' }).click();
+    await page.getByRole('status').filter({ hasText: 'HTTP 401' }).waitFor();
+    const candidateSearch = page.getByLabel('搜索可选模型');
+    const candidateIds = () => page.locator('#candidate-list [data-model]').evaluateAll(rows => rows.map(row => row.dataset.model));
+    const selectedList = page.locator('#selected-model-list');
+    const selectedIds = () => selectedList.locator('code').allTextContents();
+    const defaultRow = selectedList.getByRole('listitem').filter({ has: page.getByText('默认', { exact: true }) });
+    const defaultId = () => defaultRow.locator('code').textContent();
+    await candidateSearch.fill('qwen 3.8 FLASH');
+    assert.deepEqual(await candidateIds(), ['qwen3.8-flash']);
+    await candidateSearch.fill('ＤｅｅｐＳｅｅｋ　flash');
+    assert.deepEqual(await candidateIds(), ['deepseek-v4.1-flash-1017']);
+    await page.getByRole('checkbox', { name: 'deepseek-v4.1-flash-1017', exact: true }).check();
+    await candidateSearch.press('Enter');
+    assert.ok(await candidateSearch.isVisible(), 'Searching with Enter must not save the model');
+    assert.equal(await defaultId(), 'deepseek-v4.1-flash-1017');
+    await candidateSearch.fill('轻量');
+    await page.getByText('当前列表没有匹配的模型。', { exact: true }).waitFor();
+    await page.evaluate(() => { window.qwenCatalogAvailable = true; });
+    await page.locator('#refresh-catalog').click();
+    await page.getByText('已读取 2 个模型。', { exact: true }).waitFor();
+    assert.equal(await candidateSearch.inputValue(), '轻量');
+    assert.deepEqual(await candidateIds(), ['qwen3.8-flash']);
+    assert.deepEqual(await selectedIds(), ['deepseek-v4.1-flash-1017']);
+    await candidateSearch.fill('');
+    assert.deepEqual(await candidateIds(), ['qwen3.8-flash', 'qwen3.8-max']);
+    await page.getByRole('button', { name: '返回模型库', exact: true }).click();
+    assert.equal(await page.locator('#saved-count').innerText(), '0');
+
     await nav('客户端').click();
     await page.getByRole('button', { name: '配置新模型' }).click();
     await page.locator('#provider-picker').selectOption('kimi');
@@ -393,8 +450,7 @@ async function main() {
     await page.getByRole('button', { name: '加载模型列表' }).click();
     await page.getByText('已读取 2 个模型。', { exact: true }).waitFor();
     await page.getByRole('checkbox', { name: /Kimi K3.1 Pro/ }).check();
-    assert.equal(await page.getByLabel('模型 ID', { exact: true }).inputValue(), 'k3.1-pro');
-    const candidateSearch = page.getByLabel('搜索可选模型');
+    assert.equal(await defaultId(), 'k3.1-pro');
     await candidateSearch.fill('k3');
     await page.getByRole('checkbox', { name: 'Kimi K3 k3', exact: true }).check();
     await candidateSearch.fill('k3.1');
@@ -407,7 +463,7 @@ async function main() {
     await capture('04-select');
     await page.getByRole('button', { name: '测试连接' }).click();
     await page.getByText('模型调用通过，耗时 42 毫秒。', { exact: true }).waitFor();
-    await page.getByLabel('显示名称（可选）').fill('Kimi 工作档');
+    await page.getByLabel('档案名称（可选）').fill('Kimi 工作档');
     await page.getByRole('button', { name: '保存 2 个模型', exact: true }).click();
     await page.getByText('档案已保存。选择连接方式后，点击「应用模式」。').waitFor();
     assert.deepEqual(await page.evaluate(() => window.batchSaves[0]), {
@@ -514,7 +570,7 @@ async function main() {
     await page.locator('#account-picker').selectOption({ label: '测试备用账号' });
     await page.getByRole('button', { name: '手动选择模型', exact: true }).click();
     await page.getByRole('checkbox', { name: 'k3.1-pro-highspeed', exact: true }).check();
-    assert.equal(await page.locator('#model-id').inputValue(), 'k3.1-pro-highspeed');
+    assert.equal(await defaultId(), 'k3.1-pro-highspeed');
     await page.getByRole('button', { name: '返回模型库', exact: true }).click();
     await savedTab.click();
     page.once('dialog', dialog => dialog.accept());
@@ -580,7 +636,7 @@ async function main() {
     await page.getByRole('button', { name: '拉取模型', exact: true }).click();
     await page.getByText('供应商模型目录（1 项）', { exact: true }).waitFor();
     await page.getByRole('button', { name: '配置所选模型', exact: true }).click();
-    assert.equal(await page.locator('#model-id').inputValue(), 'fixture-codex-alt');
+    assert.equal(await defaultId(), 'fixture-codex-alt');
     assert.equal(await page.locator('#account-picker').inputValue(), 'openai-account');
     await page.getByRole('button', { name: '返回客户端', exact: true }).click();
     page.once('dialog', dialog => dialog.accept());
@@ -670,7 +726,7 @@ async function main() {
     for (const name of ['docs', 'research']) {
       await page.getByRole('button', { name: '添加 MCP' }).click();
       await page.getByLabel('服务名称').fill(name);
-      await page.getByLabel('MCP 服务地址').fill('https://example.invalid/mcp');
+      await page.getByLabel('MCP 服务地址').fill(name === 'docs' ? 'https://example.invalid/mcp' : 'https://example.invalid/denied');
       if (name === 'docs') {
         await page.getByText('请求头（可选）', { exact: true }).click();
         await page.getByRole('button', { name: '添加请求头' }).click();
@@ -685,8 +741,26 @@ async function main() {
     }
     assert.equal(await catalogSearch.isVisible(), false);
     await page.getByText('2 个服务', { exact: true }).waitFor();
-    await page.getByRole('button', { name: '验证连接 docs', exact: true }).click();
-    await page.getByText('验证通过 · 发现 3 个工具', { exact: true }).waitFor();
+    const mcpRow = name => page.locator('.mcp-row').filter({ has: page.getByText(name, { exact: true }) });
+    const docsRow = mcpRow('docs');
+    const researchRow = mcpRow('research');
+    await docsRow.getByText('未验证', { exact: true }).waitFor();
+    await Promise.all([
+      docsRow.getByText('验证中', { exact: true }).waitFor(),
+      docsRow.getByRole('button', { name: '验证连接 docs', exact: true }).click(),
+    ]);
+    await docsRow.getByText('验证通过', { exact: true }).waitFor();
+    assert.ok(await docsRow.getByText('发现 3 个工具', { exact: true }).isVisible());
+    assert.ok(await researchRow.getByText('未验证', { exact: true }).isVisible());
+    await page.getByLabel('搜索 MCP 服务').fill('research');
+    await researchRow.getByRole('button', { name: '验证连接 research', exact: true }).click();
+    await researchRow.getByText('验证失败', { exact: true }).waitFor();
+    assert.ok(await researchRow.getByText('MCP 认证失败（HTTP 401），请检查凭据或服务权限', { exact: true }).isVisible());
+    await page.getByLabel('搜索 MCP 服务').fill('');
+    await page.getByRole('button', { name: '刷新列表' }).click();
+    await docsRow.getByText('验证通过', { exact: true }).waitFor();
+    await researchRow.getByText('验证失败', { exact: true }).waitFor();
+    await capture('05-mcp-status');
     await page.getByRole('button', { name: '编辑 docs', exact: true }).click();
     const endpoint = page.getByLabel('MCP 服务地址');
     await page.waitForFunction(() => document.querySelector('#mcp-endpoint').value === 'https://example.invalid/mcp');
@@ -707,6 +781,8 @@ async function main() {
     assert.equal(await page.locator('#mcp-editor-feedback').isVisible(), false);
     await page.getByRole('button', { name: '保存 MCP' }).click();
     await page.getByText('已保存 docs 到 Codex。').waitFor();
+    await docsRow.getByText('未验证', { exact: true }).waitFor();
+    assert.ok(await researchRow.getByText('验证失败', { exact: true }).isVisible());
     await page.getByRole('button', { name: '编辑 docs', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#mcp-endpoint').value === 'https://example.invalid/updated');
     await capture('05-mcp-edit');
@@ -719,6 +795,7 @@ async function main() {
     await page.getByText('1 / 2 个服务', { exact: true }).waitFor();
     await page.getByRole('button', { name: '停用', exact: true }).click();
     await page.getByText('Streamable HTTP · 配置已停用', { exact: true }).waitFor();
+    assert.ok(await researchRow.getByText('未验证', { exact: true }).isVisible());
     await page.getByRole('button', { name: '启用', exact: true }).click();
     await page.getByText('Streamable HTTP · 已写入本机', { exact: true }).waitFor();
     await page.getByLabel('搜索 MCP 服务').fill('');
@@ -734,6 +811,25 @@ async function main() {
     await page.locator('#mcp-show-configured').click();
     await page.getByRole('button', { name: '更新 Key' }).waitFor();
     assert.equal(await page.getByText('research', { exact: true }).count(), 0);
+    const toolPermissions = page.getByRole('button', { name: '工具权限 frameleap', exact: true });
+    await toolPermissions.click();
+    const permit = page.getByRole('dialog', { name: '工具权限 · frameleap' });
+    const savePermission = permit.getByRole('button', { name: '保存权限' });
+    assert.ok(await savePermission.isDisabled());
+    await permit.getByRole('button', { name: '读取工具列表' }).click();
+    const listProjects = permit.getByRole('checkbox', { name: 'list_projects' });
+    await listProjects.waitFor();
+    assert.ok(!(await listProjects.isChecked()));
+    await listProjects.check();
+    await savePermission.click();
+    await mcpRow('frameleap').getByText(/始终允许 1 项/).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.permissionWrites), [['list_projects']]);
+    await toolPermissions.click();
+    assert.ok(await listProjects.isChecked());
+    await permit.getByRole('button', { name: '清空授权' }).click();
+    await savePermission.click();
+    await page.getByRole('button', { name: '更新 Key' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.permissionWrites), [['list_projects'], []]);
     await page.getByRole('button', { name: '前往客户端启动' }).click();
     await page.getByRole('heading', { name: 'Claude Desktop', exact: true }).waitFor();
 
@@ -748,7 +844,8 @@ async function main() {
     assert.ok(await page.getByRole('link', { name: /1 美元 = 6.7174 元人民币/ }).isVisible());
     await page.locator('.usage-pricing summary').click();
     assert.match(await page.locator('#usage-cost').innerText(), /^< [¥￥]1$/);
-    assert.ok(await page.getByText('未匹配单价', { exact: true }).isVisible());
+    assert.ok(await page.getByText('未纳入 API 估价', { exact: true }).isVisible());
+    assert.equal(await page.locator('#usage-partial').isVisible(), false);
     await page.locator('#usage-client').selectOption('workbuddy');
     await page.getByText('此客户端暂无可读取的本机 Token 明细。', { exact: true }).waitFor();
     assert.equal(await page.locator('#usage-total').innerText(), '—');
@@ -763,7 +860,8 @@ async function main() {
     assert.equal(await page.locator('#usage-input').innerText(), '1,757.22 M');
     assert.equal(await page.locator('#usage-output').innerText(), '5.77 M');
     assert.match(await page.locator('#usage-cost').innerText(), /^约 [¥￥]2,713$/);
-    assert.equal(await page.locator('#usage-cost-note').innerText(), '2 条明细缺少单价');
+    assert.equal(await page.locator('#usage-cost-note').innerText(), '2 条明细未纳入估价');
+    assert.equal(await page.locator('#usage-partial').innerText(), '部分统计：Codex 的本机用量记录未读全。');
     const topModel = page.locator('#usage-rows tr').first();
     assert.equal(await topModel.locator('.usage-row-total .usage-token').innerText(), '1,413.55 M');
     assert.equal(await topModel.getByText('1,390.06 M', { exact: true }).getAttribute('title'), '1,390,062,208 Token');
@@ -775,6 +873,9 @@ async function main() {
     assert.equal(await page.locator('#usage-total').innerText(), '1,448.01 M');
     assert.equal(await page.locator('#usage-rows tr').count(), 2);
     assert.match(await page.locator('#usage-cost').innerText(), /^约 [¥￥]2,203$/);
+    assert.ok(await page.locator('#usage-partial').isVisible());
+    await page.locator('#usage-client').selectOption('desktop');
+    assert.equal(await page.locator('#usage-partial').isVisible(), false);
     await page.locator('#usage-client').selectOption('');
 
     await page.evaluate(() => window.prepareAgentModels());
@@ -850,12 +951,15 @@ async function main() {
     await key.fill('fixture-deepseek-key');
     await page.getByRole('button', { name: '加载模型列表' }).click();
     await page.getByText('已读取 153 个模型。', { exact: true }).waitFor();
+    await candidateSearch.fill('fixture-model-150');
+    assert.deepEqual(await candidateIds(), ['fixture-model-150']);
+    await candidateSearch.fill('');
     const flash = page.getByRole('checkbox', { name: /DeepSeek Flash/ });
     const pro = page.getByRole('checkbox', { name: /DeepSeek Pro/ });
     await flash.check();
     await pro.check();
     await flash.uncheck();
-    assert.equal(await page.locator('#model-id').inputValue(), 'deepseek-v4-pro');
+    assert.equal(await defaultId(), 'deepseek-v4-pro');
     await flash.check();
     await page.getByRole('button', { name: '显示更多模型', exact: true }).click();
     assert.equal(await page.getByRole('checkbox', { name: 'Fixture 150 fixture-model-150', exact: true }).count(), 1);
@@ -866,6 +970,64 @@ async function main() {
     await nav('模型库').click();
     await libraryProvider.selectOption('deepseek');
     assert.equal(await page.locator('.saved-model').count(), 2);
+
+    await libraryProvider.selectOption('kimi');
+    const kimiProfile = page.locator('.saved-model').filter({ has: page.getByRole('heading', { name: 'Kimi 工作档', exact: true }) });
+    await kimiProfile.getByRole('button', { name: '编辑', exact: true }).click();
+    assert.equal(await page.getByRole('checkbox', { name: 'k3.1-pro', exact: true }).isChecked(), true);
+    assert.equal(await page.getByRole('checkbox', { name: 'k3', exact: true }).isChecked(), true);
+    await candidateSearch.fill('256k');
+    await page.getByRole('checkbox', { name: 'k3-256k', exact: true }).check();
+    await page.getByRole('button', { name: '拉取账号目录' }).click();
+    await page.getByText('已读取 2 个模型。', { exact: true }).waitFor();
+    assert.equal(await candidateSearch.inputValue(), '256k');
+    assert.deepEqual(await candidateIds(), []);
+    assert.deepEqual(await selectedIds(), ['k3.1-pro', 'k3', 'k3-256k']);
+    await candidateSearch.fill('');
+    const manualModels = page.getByText('手动添加模型 ID', { exact: true });
+    await manualModels.click();
+    await page.getByLabel('模型 ID（每行一个）').fill('k3[1m]\nfixture-private-model\nfixture-private-model');
+    await page.getByRole('button', { name: '加入列表' }).click();
+    await manualModels.click();
+    assert.deepEqual(await selectedIds(), ['k3.1-pro', 'k3', 'k3-256k', 'fixture-private-model']);
+    await page.getByRole('button', { name: '将 k3-256k 设为默认' }).click();
+    await page.getByRole('button', { name: '移除 k3', exact: true }).click();
+    assert.equal(await page.getByRole('checkbox', { name: 'Kimi K3 k3', exact: true }).isChecked(), false);
+    assert.equal(await defaultId(), 'k3-256k');
+    assert.equal(await page.getByLabel('档案模型 ID', { exact: true }).inputValue(), 'k3.1-pro');
+    await candidateSearch.focus();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await capture('11-model-editor');
+    await page.setViewportSize({ width: 390, height: 560 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+    await capture('12-model-editor-narrow', { fullPage: true });
+    await page.setViewportSize({ width: 1080, height: 760 });
+    await page.getByRole('button', { name: '测试连接' }).click();
+    await page.getByText('模型调用通过，耗时 42 毫秒。', { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.probedModel), 'k3-256k');
+    await page.getByRole('button', { name: '保存档案', exact: true }).click();
+    await kimiProfile.getByText('fixture-private-model', { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.editedProfile), {
+      id: 'k3.1-pro-profile', model: 'k3.1-pro', desktopModels: ['k3-256k', 'k3.1-pro', 'fixture-private-model'],
+    });
+
+    await nav('客户端').click();
+    await client('Claude Desktop').click();
+    await page.getByLabel('运行模式').selectOption('third_party');
+    await page.locator('#client-model-picker').selectOption('k3.1-pro-profile');
+    await page.getByRole('button', { name: '配置可选模型', exact: true }).click();
+    assert.deepEqual(await selectedIds(), ['k3-256k', 'k3.1-pro', 'fixture-private-model']);
+    assert.equal(await defaultId(), 'k3-256k');
+    await page.mouse.move(4, 4);
+    await page.evaluate(() => document.activeElement.blur());
+    await capture('13-desktop-models');
+    await page.getByRole('checkbox', { name: 'k3-256k', exact: true }).uncheck();
+    assert.equal(await defaultId(), 'k3.1-pro');
+    await page.getByRole('button', { name: '保存档案', exact: true }).click();
+    await page.getByText('档案已保存。选择连接方式后，点击「应用模式」。').waitFor();
+    assert.deepEqual(await page.evaluate(() => window.editedProfile), {
+      id: 'k3.1-pro-profile', model: 'k3.1-pro', desktopModels: ['k3.1-pro', 'fixture-private-model'],
+    });
 
     assert.deepEqual(errors, []);
     console.log('codeneo-lite UI: model library filters, model setup and undo, native launch, MCP edit and verification, usage, and narrow layout passed.');

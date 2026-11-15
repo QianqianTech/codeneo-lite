@@ -1,5 +1,5 @@
 use crate::{
-    agents, files,
+    agents, desktop, files,
     transaction::{self, Client, Plan},
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, path::Path};
 pub mod catalog;
 mod import;
 pub mod options;
+pub(crate) mod policy;
 mod probe;
 mod targets;
 pub use import::{parse_import, Imported};
@@ -82,6 +83,9 @@ struct Server {
     name: String,
     transport: &'static str,
     enabled: bool,
+    revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permissions: Option<policy::Summary>,
 }
 
 #[derive(Serialize)]
@@ -95,9 +99,10 @@ pub struct Configured {
 
 pub fn list(root: &Path, client: Client, selection: Selection) -> Result<Configured, String> {
     agents::ensure_compatible(client)?;
+    let _lock = desktop_lock(root, client)?;
     let location = selection.resolve(client)?;
     let plan = open(client, &location.path)?;
-    let mut servers = list_at(&plan, &location.sections(), client)?;
+    let mut servers = list_at(&plan, &location.path, &location.sections(), client)?;
     if client == Client::Copilot {
         let settings = Plan::open(&agents::copilot_home()?.join("settings.json"))?;
         if let Some(disabled) = settings
@@ -109,6 +114,24 @@ pub fn list(root: &Path, client: Client, selection: Selection) -> Result<Configu
             }
         }
     }
+    let profile = desktop_profile(root, client, &location)?;
+    if let Some(profile) = &profile {
+        for server in &mut servers {
+            if server.enabled && profile.eligible(&server.name)? {
+                server.permissions = Some(policy::Summary {
+                    always_allow: Vec::new(),
+                });
+            }
+        }
+        servers.extend(profile.entries().map(|(name, entry, permissions)| Server {
+            name: name.into(),
+            transport: "stdio",
+            enabled: true,
+            revision: revision(&location.path, entry),
+            permissions: Some(permissions),
+        }));
+        servers.sort_by(|a, b| a.name.cmp(&b.name));
+    }
     Ok(Configured {
         location: location.id(),
         path: location.path.to_str().ok_or("MCP 配置路径编码无效")?.into(),
@@ -118,16 +141,40 @@ pub fn list(root: &Path, client: Client, selection: Selection) -> Result<Configu
             client,
             location.backup_slot().as_deref(),
             &location.path,
-        ),
+        ) || profile.as_ref().is_some_and(|profile| profile.can_undo(root)),
         servers,
     })
+}
+
+fn desktop_lock(root: &Path, client: Client) -> Result<Option<std::fs::File>, String> {
+    if client != Client::Desktop {
+        return Ok(None);
+    }
+    let lock = files::lock(root)?;
+    policy::recover(root)?;
+    Ok(Some(lock))
+}
+
+fn desktop_profile(
+    root: &Path,
+    client: Client,
+    location: &Location,
+) -> Result<Option<policy::Profile>, String> {
+    if client != Client::Desktop {
+        return Ok(None);
+    }
+    let target = desktop::target()?;
+    if target.path != location.path {
+        return Err("Claude Desktop 的当前模式已改变，请刷新后重试".into());
+    }
+    policy::Profile::open(root, &target)
 }
 
 fn open(client: Client, path: &Path) -> Result<Plan, String> {
     Plan::open_as(path, agents::is_added(client))
 }
 
-fn list_at(plan: &Plan, sections: &[&str], client: Client) -> Result<Vec<Server>, String> {
+fn list_at(plan: &Plan, path: &Path, sections: &[&str], client: Client) -> Result<Vec<Server>, String> {
     let (section, parents) = sections.split_last().ok_or("找不到 MCP 配置项")?;
     let Some(servers) = plan.get_at(parents, section)? else {
         return Ok(Vec::new());
@@ -144,6 +191,8 @@ fn list_at(plan: &Plan, sections: &[&str], client: Client) -> Result<Vec<Server>
             enabled: server["enabled"] != false
                 && server["disabled"] != true
                 && !disabled.is_some_and(|entries| entries.iter().any(|entry| entry == name)),
+            revision: revision(path, server),
+            permissions: None,
         })
         .collect())
 }
@@ -178,10 +227,17 @@ pub struct Editable {
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum Verification {
     Saved { name: String },
+    Permission { name: String },
     Draft { input: Input },
 }
 
-fn revision(path: &Path, server: &Value) -> String {
+#[derive(Serialize)]
+pub struct VerificationResult {
+    pub revision: String,
+    pub result: Result<Check, String>,
+}
+
+pub fn revision(path: &Path, server: &Value) -> String {
     let mut hash = Sha256::new();
     hash.update(path.as_os_str().as_encoded_bytes());
     hash.update([0]);
@@ -503,7 +559,13 @@ pub fn migrate_legacy_playwright(
     }
     agents::ensure_compatible(client)?;
     let _lock = files::lock(root)?;
+    if client == Client::Desktop {
+        policy::recover(root)?;
+    }
     let location = destination.resolve(client)?;
+    if desktop_profile(root, client, &location)?.is_some_and(|profile| profile.contains(name)) {
+        return Ok(());
+    }
     let section = location.sections();
     let plan = open(client, &location.path)?;
     let server = configured(&plan, &section, name)?.clone();
@@ -522,6 +584,7 @@ pub fn migrate_legacy_playwright(
 }
 
 pub fn verification_entry(
+    root: &Path,
     client: Client,
     destination: Destination,
     target: Verification,
@@ -531,7 +594,18 @@ pub fn verification_entry(
     let section = location.sections();
     let plan = open(client, &location.path)?;
     let server = match target {
-        Verification::Saved { name } => configured(&plan, &section, &name)?.clone(),
+        Verification::Saved { name } | Verification::Permission { name } => {
+            let profile = desktop_profile(root, client, &location)?;
+            let managed = profile.as_ref().and_then(|profile| {
+                profile.entries()
+                    .find(|(key, _, _)| *key == name)
+                    .map(|(_, entry, _)| entry)
+            });
+            match managed {
+                Some(entry) => entry.clone(),
+                None => configured(&plan, &section, &name)?.clone(),
+            }
+        }
         Verification::Draft { input } => prepared_entry(
             &location.path,
             client,
@@ -550,7 +624,13 @@ pub fn save(
 ) -> Result<(), String> {
     agents::ensure_compatible(client)?;
     let _lock = files::lock(root)?;
+    if client == Client::Desktop {
+        policy::recover(root)?;
+    }
     let location = destination.resolve(client)?;
+    if desktop_profile(root, client, &location)?.is_some_and(|profile| profile.contains(&input.name)) {
+        return Err("此名称已在第三方档案中使用。若由 Lite 设置了工具权限，请先清空权限再编辑连接".into());
+    }
     let plan = save_at(
         open(client, &location.path)?,
         &location.path,
@@ -559,6 +639,20 @@ pub fn save(
         &input,
     )?;
     commit(root, client, &location, plan)
+}
+
+pub fn save_permissions(
+    root: &Path,
+    destination: Destination,
+    name: &str,
+    expected: &str,
+    always_allow: Vec<String>,
+) -> Result<(), String> {
+    let _lock = desktop_lock(root, Client::Desktop)?;
+    let location = destination.resolve(Client::Desktop)?;
+    desktop_profile(root, Client::Desktop, &location)?
+        .ok_or("工具权限仅支持 CodeNeo Lite 管理的 Claude Desktop 第三方档案")?
+        .save(root, name, expected, always_allow)
 }
 
 fn commit(root: &Path, client: Client, location: &Location, plan: Plan) -> Result<(), String> {
@@ -609,7 +703,15 @@ pub fn remove(
         return Err("MCP 服务名称无效".into());
     }
     let _lock = files::lock(root)?;
+    if client == Client::Desktop {
+        policy::recover(root)?;
+    }
     let location = destination.resolve(client)?;
+    if let Some(profile) = desktop_profile(root, client, &location)? {
+        if profile.contains(name) {
+            return profile.remove(root, name);
+        }
+    }
     let mut plan = open(client, &location.path)?;
     plan.set_at(&location.sections(), name, None)?;
     commit(root, client, &location, plan)
@@ -644,7 +746,15 @@ pub fn set_enabled(
 
 pub fn undo(root: &Path, client: Client, destination: Destination) -> Result<(), String> {
     let _lock = files::lock(root)?;
+    if client == Client::Desktop {
+        policy::recover(root)?;
+    }
     let location = destination.resolve(client)?;
+    if let Some(profile) = desktop_profile(root, client, &location)? {
+        if profile.can_undo(root) {
+            return profile.undo(root);
+        }
+    }
     transaction::undo_mcp(
         root,
         client,
@@ -726,10 +836,12 @@ mod tests {
         let mut local = input("docs", Transport::Stdio, "node");
         local.connection.args = vec!["docs.mjs".into()];
         save(save_at(open(), &path, section, Client::Codex, &local).unwrap());
-        save(toggle_at(open(), &["mcp_servers"], "search", Client::Codex, false).unwrap());
-        let result =
-            serde_json::to_value(list_at(&open(), &["mcp_servers"], Client::Codex).unwrap())
-                .unwrap();
+        let before = list_at(&open(), &path, section, Client::Codex).unwrap();
+        save(toggle_at(open(), section, "search", Client::Codex, false).unwrap());
+        let after = list_at(&open(), &path, section, Client::Codex).unwrap();
+        assert_eq!(before[0].revision, after[0].revision);
+        assert_ne!(before[1].revision, after[1].revision);
+        let result = serde_json::to_value(after).unwrap();
         assert_eq!(result.as_array().unwrap().len(), 2);
         assert_eq!(result[1]["enabled"], false);
         assert!(!result.to_string().contains("fixture-secret"));
@@ -861,6 +973,7 @@ mod tests {
         assert!(!other.join(".mcp.json").exists());
         save(&root, Client::Code, destination(), make()).unwrap();
         let (server, location) = verification_entry(
+            &root,
             Client::Code,
             destination(),
             Verification::Saved {

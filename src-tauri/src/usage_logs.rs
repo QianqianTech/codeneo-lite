@@ -67,11 +67,16 @@ fn claude_record(line: &[u8]) -> Option<ClaudeUsage> {
 pub(super) fn claude(path: &Path, size: u64) -> Parsed<ClaudeUsage> {
     let marker = Finder::new(b"\"usage\"");
     let mut usage = Vec::new();
-    let read = read_records(path, size, |line| {
-        if marker.find(line).is_some() {
-            usage.extend(claude_record(line));
-        }
-    });
+    let read = read_records(
+        path,
+        size,
+        |_| false,
+        |line| {
+            if marker.find(line).is_some() {
+                usage.extend(claude_record(line));
+            }
+        },
+    );
     Parsed { usage, read }
 }
 
@@ -205,10 +210,8 @@ pub(super) fn codex(path: &Path, size: u64) -> Parsed<CodexUsage> {
     };
     let markers: Vec<_> = CODEX_MARKERS.iter().map(Finder::new).collect();
     let mut usage = Vec::new();
-    let read = read_records(path, size, |line| {
-        if !might_record_codex_usage(line)
-            || !markers.iter().any(|marker| marker.find(line).is_some())
-        {
+    let read = read_records(path, size, codex_non_usage, |line| {
+        if codex_non_usage(line) || !markers.iter().any(|marker| marker.find(line).is_some()) {
             return;
         }
         if let Ok(record) = serde_json::from_slice(line) {
@@ -218,32 +221,39 @@ pub(super) fn codex(path: &Path, size: u64) -> Parsed<CodexUsage> {
     Parsed { usage, read }
 }
 
-fn might_record_codex_usage(line: &[u8]) -> bool {
+fn codex_kind_prefix(line: &[u8]) -> Option<&[u8]> {
     // Current rollouts start with the timestamp, optional ordinal, then type.
     // When that layout differs, let the marker search examine the whole line.
-    let Some(rest) = line.strip_prefix(b"{\"timestamp\":\"") else {
-        return true;
-    };
-    let Some(end) = memchr::memchr2(b'"', b'\\', rest.get(..40).unwrap_or(rest)) else {
-        return true;
-    };
+    let rest = line.strip_prefix(b"{\"timestamp\":\"")?;
+    let end = memchr::memchr2(b'"', b'\\', rest.get(..40).unwrap_or(rest))?;
     if rest[end] != b'"' {
-        return true;
+        return None;
     }
     let mut rest = &rest[end + 1..];
     if let Some(ordinal) = rest.strip_prefix(b",\"ordinal\":") {
-        let Some(end) = memchr::memchr(b',', ordinal.get(..21).unwrap_or(ordinal)) else {
-            return true;
-        };
+        let end = memchr::memchr(b',', ordinal.get(..21).unwrap_or(ordinal))?;
         if !ordinal[..end].iter().all(u8::is_ascii_digit) {
-            return true;
+            return None;
         }
         rest = &ordinal[end..];
     }
-    let Some(kind) = rest.strip_prefix(b",\"type\":\"") else {
-        return true;
+    rest.strip_prefix(b",\"type\":\"")
+}
+
+fn codex_non_usage(line: &[u8]) -> bool {
+    let Some(kind) = codex_kind_prefix(line) else {
+        return false;
     };
-    !kind.starts_with(b"response_item\",\"payload\":")
+    if kind.starts_with(b"response_item\",\"payload\":")
+        || kind.starts_with(b"compacted\",\"payload\":")
+    {
+        return true;
+    }
+    let Some(event) = kind.strip_prefix(b"event_msg\",\"payload\":{\"type\":\"") else {
+        return false;
+    };
+    memchr::memchr2(b'"', b'\\', event.get(..48).unwrap_or(event))
+        .is_some_and(|end| event[end] == b'"' && &event[..end] != b"token_count")
 }
 
 #[cfg(test)]
@@ -299,6 +309,32 @@ mod tests {
         assert_eq!(parsed.usage[1].model.as_ref(), "gpt-6.1-sol");
         assert_eq!(parsed.usage[1].id.as_deref(), Some("new-response"));
         assert_eq!(parsed.usage[1].tokens.total(), 12);
+    }
+
+    #[test]
+    fn oversized_codex_tool_and_compaction_records_do_not_hide_usage() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let text = "x".repeat(super::super::MAX_LINE as usize);
+        for (ordinal, (kind, payload)) in [
+            (
+                "response_item",
+                r#"{"type":"function_call_output","output":""#,
+            ),
+            ("compacted", r#"{"message":""#),
+            ("event_msg", r#"{"type":"exec_command_end","stdout":""#),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            writeln!(file, r#"{{"timestamp":"2026-11-13T00:00:00Z","ordinal":{ordinal},"type":"{kind}","payload":{payload}{text}"}}}}"#).unwrap();
+        }
+        writeln!(file, r#"{{"timestamp":"2026-11-13T00:00:01Z","type":"token_usage_record","payload":{{"response_id":"one","usage":{{"input_tokens":100,"cached_input_tokens":80,"output_tokens":12}}}}}}"#).unwrap();
+        let parsed = codex(file.path(), file.as_file().metadata().unwrap().len());
+        assert!(parsed.read.complete);
+        assert_eq!(parsed.usage.len(), 1);
+        assert_eq!(parsed.usage[0].tokens.total(), 112);
     }
 
     #[test]

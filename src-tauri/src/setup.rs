@@ -1,6 +1,7 @@
 use crate::{
     desktop::{self, Target},
     files,
+    mcp::policy,
     remote::Remote,
     secrets,
 };
@@ -15,6 +16,7 @@ pub enum State {
     Configured,
     Existing,
     NeedsRepair,
+    PermissionManaged,
 }
 
 #[derive(Serialize)]
@@ -34,6 +36,9 @@ fn entry(executable: &str, slot: &str) -> Value {
 }
 
 fn state(target: &Target, root: &Path, executable: &str) -> Result<State, String> {
+    if policy_manages_frameleap(target, root)? {
+        return Ok(State::PermissionManaged);
+    }
     let bytes = files::read(&target.path)?;
     let doc = desktop::document(bytes.as_deref())?;
     let Some(current) = desktop::mcp(&doc)?.and_then(|servers| servers.get("frameleap")) else {
@@ -63,6 +68,8 @@ pub fn status() -> Result<Status, String> {
 pub async fn configure(key: &str) -> Result<Configured, String> {
     let key = secrets::validated(key)?;
     let target = desktop::target()?;
+    let root = secrets::root()?;
+    ensure_editable(&target, &root)?;
     let before = files::read(&target.path)?;
     desktop::mcp(&desktop::document(before.as_deref())?)?;
     let executable = desktop::launcher()?;
@@ -76,7 +83,7 @@ pub async fn configure(key: &str) -> Result<Configured, String> {
     }
     install(
         &target,
-        &secrets::root()?,
+        &root,
         before.as_deref(),
         &executable,
         key,
@@ -87,6 +94,17 @@ pub async fn configure(key: &str) -> Result<Configured, String> {
     })
 }
 
+fn policy_manages_frameleap(target: &Target, root: &Path) -> Result<bool, String> {
+    Ok(policy::Profile::open(root, target)?.is_some_and(|profile| profile.contains("frameleap")))
+}
+
+fn ensure_editable(target: &Target, root: &Path) -> Result<(), String> {
+    if policy_manages_frameleap(target, root)? {
+        return Err("FrameLeap 已由第三方档案管理。若通过 Lite 设置了工具权限，请先清空权限再更新 Key".into());
+    }
+    Ok(())
+}
+
 fn install(
     target: &Target,
     root: &Path,
@@ -95,6 +113,8 @@ fn install(
     key: &str,
 ) -> Result<(), String> {
     let _lock = files::lock(root)?;
+    policy::recover(root)?;
+    ensure_editable(target, root)?;
     if files::read(&target.path)?.as_deref() != before {
         return Err("Claude Desktop 的配置已被修改，请重试".into());
     }

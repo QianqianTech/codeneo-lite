@@ -1,4 +1,4 @@
-use super::{checked_url, connection, validate_connection, Transport};
+use super::{checked_url, connection, policy, validate_connection, Transport};
 use crate::{agents, launch, remote, transaction::Client};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE},
@@ -6,7 +6,13 @@ use reqwest::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, env, io, path::Path, process::Stdio, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, io,
+    path::Path,
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout, Command},
@@ -26,6 +32,7 @@ const CLOSED: &str = "MCP 进程已退出或关闭了连接，请检查启动命
 pub struct Check {
     protocol_version: String,
     tool_count: Option<usize>,
+    tool_names: Vec<String>,
 }
 
 pub async fn check(client: Client, server: Value, project: Option<&Path>) -> Result<Check, String> {
@@ -134,12 +141,14 @@ async fn discover(channel: &mut Channel, transport: Transport) -> Result<Check, 
     let mut check = Check {
         protocol_version: protocol.to_owned(),
         tool_count: None,
+        tool_names: Vec::new(),
     };
     if capabilities.get("tools").is_none_or(Value::is_null) {
         return Ok(check);
     }
     let mut request = json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"});
     let mut count = 0;
+    let mut names = BTreeSet::new();
     // Bound discovery in case a server keeps returning a cursor.
     for id in 3..=102 {
         let result = channel.call(request).await?;
@@ -153,11 +162,17 @@ async fn discover(channel: &mut Channel, transport: Transport) -> Result<Check, 
             return Err("服务返回的 MCP 工具列表无效".into());
         }
         count += tools.len();
+        for name in tools.iter().filter_map(|tool| tool["name"].as_str()) {
+            if names.len() < policy::MAX_TOOLS && policy::tool_name(name) {
+                names.insert(name.to_owned());
+            }
+        }
         let Some(cursor) = result["nextCursor"]
             .as_str()
             .filter(|cursor| !cursor.is_empty())
         else {
             check.tool_count = Some(count);
+            check.tool_names = names.into_iter().collect();
             return Ok(check);
         };
         request =
@@ -583,6 +598,7 @@ mod tests {
         Ok(Check {
             protocol_version: PROTOCOLS[0].into(),
             tool_count: Some(0),
+            tool_names: Vec::new(),
         })
     }
 
@@ -656,7 +672,8 @@ mod tests {
             result,
             Check {
                 protocol_version: "2025-06-18".into(),
-                tool_count: Some(2)
+                tool_count: Some(2),
+                tool_names: vec!["one".into(), "two".into()],
             }
         );
         let mut methods = Vec::new();
@@ -733,7 +750,8 @@ mod tests {
             result,
             Check {
                 protocol_version: "2024-11-05".into(),
-                tool_count: Some(0)
+                tool_count: Some(0),
+                tool_names: Vec::new(),
             }
         );
         listener.abort();
@@ -803,7 +821,8 @@ mod tests {
             result,
             Check {
                 protocol_version: "2025-06-18".into(),
-                tool_count: Some(1)
+                tool_count: Some(1),
+                tool_names: vec!["fixture".into()],
             }
         );
         assert!(finished.exists());

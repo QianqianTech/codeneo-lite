@@ -273,6 +273,16 @@ fn credential_path(root: &Path, id: &str) -> Result<PathBuf, String> {
 }
 
 pub fn key(root: &Path, account: &Account) -> Result<String, String> {
+    let key = read_key(root, account)?;
+    validate_key_for_provider(account, &key)?;
+    Ok(key)
+}
+
+pub(crate) fn has_readable_key(root: &Path, account: &Account) -> bool {
+    read_key(root, account).is_ok()
+}
+
+fn read_key(root: &Path, account: &Account) -> Result<String, String> {
     let path = credential_path(root, &account.credential)?;
     let bytes = vault::read(root, &path)?.ok_or("此接入账号的 Key 已丢失，请重新填写")?;
     let key = String::from_utf8(bytes).map_err(|_| "此接入账号的 Key 无法读取")?;
@@ -287,6 +297,20 @@ fn validate_key(key: &str) -> Result<(), String> {
         || key.contains(char::is_whitespace)
     {
         return Err("请填写有效的模型 API Key".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn is_aliyun_token_plan(url: &reqwest::Url) -> bool {
+    url.scheme() == "https" && url.host_str() == Some("token-plan.cn-beijing.maas.aliyuncs.com")
+}
+
+fn validate_key_for_provider(account: &Account, key: &str) -> Result<(), String> {
+    // Also check accounts configured manually for this endpoint.
+    let token_plan =
+        reqwest::Url::parse(&account.base_url).is_ok_and(|url| is_aliyun_token_plan(&url));
+    if token_plan && !key.strip_prefix("sk-sp-").is_some_and(|tail| !tail.is_empty()) {
+        return Err("千问 Token Plan 地址需要套餐专属 API Key（以 sk-sp- 开头）。请在模型库更新该接入账号的 Key，再重新应用档案。".into());
     }
     Ok(())
 }
@@ -437,12 +461,30 @@ fn preset(id: &str) -> Option<Preset> {
                 "kimi-for-coding",
                 "kimi-for-coding-highspeed",
             ],
+            // Text models documented for Token Plan. Availability varies by subscription.
+            // https://help.aliyun.com/zh/model-studio/token-plan-team-overview
             "qwen" => &[
                 "qwen4-max-preview",
                 "qwen3.8-max",
                 "qwen3.8-flash",
+                "qwen3.7-max",
+                "qwen3.7-plus",
+                "qwen3.6-plus",
                 "qwen3.6-flash",
                 "auto",
+                "deepseek-v4.1-flash",
+                "deepseek-v4.1-flash-1017",
+                "deepseek-v4-pro",
+                "deepseek-v4-pro-0813",
+                "deepseek-v4-flash-0731",
+                "kimi-k2.7-code",
+                "kimi-k2.6",
+                "kimi-k2.5",
+                "glm-5.3",
+                "glm-5.2",
+                "glm-5.1",
+                "glm-5",
+                "MiniMax-M2.5",
             ],
             "openrouter" => &[
                 "anthropic/claude-sonnet-5.5",
@@ -629,6 +671,7 @@ fn draft(root: &Path, store: &Store, input: &Input) -> Result<(Account, String),
         key(root, &account)?
     } else {
         validate_key(entered_key)?;
+        validate_key_for_provider(&account, entered_key)?;
         entered_key.to_owned()
     };
     Ok((account, key))
@@ -1151,6 +1194,45 @@ mod tests {
     }
 
     #[test]
+    fn qwen_token_plan_rejects_incompatible_keys_at_save_and_when_reading_legacy_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for preset in ["qwen", "qwen-openai"] {
+            let error = save(root, input(preset, None, "qwen3.8-max", "sk-wrong"), None)
+                .unwrap_err();
+            assert!(error.contains("sk-sp-"));
+            assert!(!error.contains("sk-wrong"));
+        }
+        assert!(!path(root).exists());
+
+        let id = save(
+            root,
+            input("qwen", None, "qwen3.8-max", "sk-sp-test"),
+            Some(Client::Desktop),
+        )
+        .unwrap();
+        let (_, store) = read(root).unwrap();
+        let (_, account) = store.model(&id).unwrap();
+        let old = credential_path(root, &account.credential).unwrap();
+        vault::write(root, &old, b"sk-legacy-key").unwrap();
+        assert!(has_readable_key(root, account));
+        assert!(key(root, account).unwrap_err().contains("sk-sp-"));
+
+        let mut edit = saved_input(root, Client::Desktop, &id, true).unwrap();
+        edit.key = "sk-sp-replacement".into();
+        assert_eq!(save(root, edit, Some(Client::Desktop)).unwrap(), id);
+        let (_, store) = read(root).unwrap();
+        assert_eq!(
+            key(root, store.model(&id).unwrap().1).unwrap(),
+            "sk-sp-replacement"
+        );
+
+        let mut other = input("custom", None, "different-model", "sk-generic-key");
+        other.base_url = "https://custom.example/apps/anthropic".into();
+        assert!(save(root, other, None).is_ok());
+    }
+
+    #[test]
     fn batch_save_reuses_one_key_and_rejects_the_entire_invalid_selection() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1246,7 +1328,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_uses_the_vendor_endpoint_and_auth_for_the_selected_client() {
-        struct CatalogStub(&'static str);
+        struct CatalogStub(&'static str, &'static str);
         impl http::ProviderTransport for CatalogStub {
             async fn request(
                 &self,
@@ -1255,7 +1337,8 @@ mod tests {
                 body: Option<serde_json::Value>,
             ) -> Result<http::ProviderReply, String> {
                 assert_eq!(url, self.0);
-                assert_eq!(header, ("authorization", "Bearer fixture-key"));
+                assert_eq!(header.0, "authorization");
+                assert_eq!(header.1, format!("Bearer {}", self.1));
                 assert!(body.is_none());
                 Ok(http::ProviderReply {
                     status: 200,
@@ -1291,13 +1374,18 @@ mod tests {
                 "https://openrouter.ai/api/v1/models/user",
             ),
         ] {
+            let credential = if preset == "qwen" {
+                "sk-sp-fixture-key"
+            } else {
+                "fixture-key"
+            };
             let (account, key) = draft(
                 temp.path(),
                 &Store::default(),
-                &input(preset, None, "", "fixture-key"),
+                &input(preset, None, "", credential),
             )
             .unwrap();
-            let result = fetch_catalog(&CatalogStub(url), &account, &key, client)
+            let result = fetch_catalog(&CatalogStub(url, credential), &account, &key, client)
                 .await
                 .unwrap();
             assert_eq!(result.models.len(), 2);

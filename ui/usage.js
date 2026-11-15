@@ -57,7 +57,7 @@
 
   function addCost(cell, estimate) {
     if (!estimate) {
-      cell.append(element("span", "muted", "未匹配单价"));
+      cell.append(element("span", "muted", "未纳入 API 估价"));
       return;
     }
     cell.append(element("strong", "usage-row-price", costText(estimate)));
@@ -108,7 +108,7 @@
       cell.append(value);
       tr.append(cell);
     }
-    const cost = metricCell("参考费用", "usage-row-cost");
+    const cost = metricCell("API 估价", "usage-row-cost");
     addCost(cost, row.estimate);
     tr.append(cost);
     return tr;
@@ -119,6 +119,11 @@
     const client = $("usage-client").value;
     const rows = report.rows.filter(row => !client || row.client === client);
     const coverage = report.coverage.filter(item => !client || item.client === client);
+    const clientName = id => lite.client(id)?.name || id;
+    const partial = coverage.filter(item => item.state === "partial");
+    $("usage-partial").hidden = !partial.length;
+    $("usage-partial").textContent = partial.length
+      ? `部分统计：${partial.map(item => clientName(item.client)).join("、")} 的本机用量记录未读全。` : "";
     const amounts = tokenColumns.map(column => rows.reduce((sum, row) => sum + column.amount(row.tokens), 0));
     const [uncached, cacheRead, cacheWrite, output] = amounts;
     const input = uncached + cacheRead + cacheWrite;
@@ -126,7 +131,7 @@
     const priced = rows.filter(row => row.estimate);
     const unknown = rows.length - priced.length;
     const unavailable = coverage.length > 0 && coverage.every(item => ["unsupported", "native"].includes(item.state));
-    const unreadable = !rows.length && coverage.length > 0 && coverage.every(item => item.state === "partial");
+    const unreadable = !rows.length && partial.length > 0;
     setTokens($("usage-total"), unavailable || unreadable ? null : total);
     setTokens($("usage-input"), unavailable || unreadable ? null : input);
     $("usage-mix").hidden = total === 0;
@@ -142,7 +147,7 @@
     $("usage-cost").textContent = priced.length ? costText(totalCost) : "—";
     $("usage-cost-caption").hidden = !priced.length;
     $("usage-cost-note").hidden = !unknown;
-    $("usage-cost-note").textContent = unknown ? `${unknown} 条明细缺少单价` : "";
+    $("usage-cost-note").textContent = unknown ? `${unknown} 条明细未纳入估价` : "";
     $("usage-pricing-date").textContent = `价格核对于 ${report.pricing_verified}`;
     $("usage-exchange").replaceChildren(sourceLink(
       `汇率基准 ${report.exchange_rate_date} · 1 美元 = ${report.usd_to_cny} 元人民币`, report.exchange_rate_source, "exchange",
@@ -155,12 +160,10 @@
     $("usage-empty").hidden = !!rows.length;
     $("usage-empty").textContent = unavailable ? coverage[0]?.detail || "此客户端暂无可读取的本机 Token 明细。"
       : unreadable ? "当前范围内没有可核验的 Token 明细。" : "所选时间内未找到可统计的本机用量。";
-    const note = coverage.filter(item => client && item.detail || ["unsupported", "partial", "native"].includes(item.state)).map(item => {
-      const label = lite.client(item.client)?.name || item.client;
-      if (item.detail && client) return item.detail;
-      if (item.state === "native") return label + " 的用量可在原客户端查看";
-      return item.state === "partial" ? `${label} 仅统计了部分本机记录` : `${label} 暂无本机用量来源`;
-    });
+    const note = coverage.map(item => {
+      if (client && item.detail) return item.detail;
+      return item.state === "native" ? `${clientName(item.client)} 的用量可在原客户端查看` : "";
+    }).filter(Boolean);
     $("usage-coverage").hidden = !note.length || unavailable;
     $("usage-coverage").textContent = note.length ? note.join("。") + "。" : "";
   }
