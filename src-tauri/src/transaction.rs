@@ -111,6 +111,14 @@ impl Delta {
     pub(crate) fn at(&self, path: &Path) -> bool {
         self.path == path
     }
+
+    pub(crate) fn edits_only(&self, path: &Path, key: &str) -> bool {
+        self.at(path)
+            && self
+                .edits
+                .iter()
+                .all(|edit| edit.section.is_none() && edit.key == key)
+    }
 }
 
 #[derive(Deserialize, Serialize)]

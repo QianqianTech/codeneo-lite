@@ -588,6 +588,7 @@ fn plan_desktop(
     store: &Store,
     id: Option<&str>,
     port: Option<u16>,
+    effort_catalog: Option<crate::desktop_effort::Catalog>,
 ) -> Result<Vec<Delta>, String> {
     let mut changes = Vec::new();
     let mut meta = Plan::open(&paths.meta)?;
@@ -604,13 +605,14 @@ fn plan_desktop(
                 model,
                 value(&meta, None, "appliedId")?,
                 port,
+                effort_catalog,
             )?;
             (config, Some(gateway))
         } else {
             let profile = models::desktop_profile(model, account);
             let key = models::key(root, account)?;
             (
-                claudekeeper_claude::desktop_gateway_config(&profile, &key, 0)?,
+                desktop_models::direct_configuration(&profile, &key)?,
                 None,
             )
         };
@@ -810,6 +812,17 @@ pub(crate) struct DesktopChange {
     pub(crate) reload: bool,
 }
 
+fn desktop_requires_reload(
+    deltas: &[Delta],
+    state: &Path,
+    owned: &Path,
+    same_gateway: bool,
+) -> bool {
+    deltas.iter().any(|delta| {
+        !(delta.at(state) || (same_gateway && delta.edits_only(owned, "inferenceModels")))
+    })
+}
+
 impl DesktopChange {
     pub(crate) async fn prepare(
         root: &Path,
@@ -821,6 +834,11 @@ impl DesktopChange {
         }
         let (_, store) = models::read(root)?;
         let locations = DesktopFiles::new(desktop::locations()?);
+        let previous = store
+            .desktop
+            .as_ref()
+            .and_then(|applied| applied.gateway.as_ref())
+            .map(desktop_models::Selection::port);
         let port = if let Some(id) = id {
             let (model, account) = store.model(id)?;
             models::require_model(Client::Desktop, model, account)?;
@@ -831,22 +849,28 @@ impl DesktopChange {
                 );
             }
             if desktop_connection(&store, model, connection) == Connection::Gateway {
-                let preferred = store
-                    .desktop
-                    .as_ref()
-                    .and_then(|applied| applied.gateway.as_ref())
-                    .map(desktop_models::Selection::port);
-                Some(gateway::prepare(&mut *gateway::SERVICE.lock().await, root, preferred).await?)
+                Some(gateway::prepare(&mut *gateway::SERVICE.lock().await, root, previous).await?)
             } else {
                 None
             }
         } else {
             None
         };
-        let deltas = plan_desktop(root, &locations, &store, id, port)?;
+        let effort_catalog = if let Some(id) = id.filter(|_| port.is_some()) {
+            let (model, account) = store.model(id)?;
+            desktop_models::discover_efforts(root, account, model).await?
+        } else {
+            None
+        };
+        let deltas = plan_desktop(root, &locations, &store, id, port, effort_catalog)?;
         let state = models::path(root);
         Ok(Self {
-            reload: deltas.iter().any(|delta| !delta.at(&state)),
+            reload: desktop_requires_reload(
+                &deltas,
+                &state,
+                &locations.owned,
+                port.is_some() && port == previous,
+            ),
             deltas,
             paths: allowed(root),
         })
@@ -1292,7 +1316,7 @@ mod tests {
         let (_, store) = models::read(&root).unwrap();
         let mut paths = desktop.paths().to_vec();
         paths.push(models::path(&root));
-        let deltas = plan_desktop(&root, &desktop, &store, Some(&id), None).unwrap();
+        let deltas = plan_desktop(&root, &desktop, &store, Some(&id), None, None).unwrap();
         transaction::commit(&root, Client::Desktop, deltas, &paths).unwrap();
         assert_eq!(read(&desktop.meta)["appliedId"], OWNED);
         assert_eq!(
@@ -1319,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_connection_is_explicit_and_the_same_gateway_models_can_switch_without_reloading() {
+    fn desktop_gateway_can_switch_model_lists_without_reloading() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().join("lite");
         let paths = DesktopFiles::new(desktop::Locations {
@@ -1328,17 +1352,28 @@ mod tests {
         });
         let first = save_model(&root, "fixture-model", None);
         let second = save_model(&root, "fixture-model", None);
+        let third = save_model(&root, "other-model", None);
         let state = models::path(&root);
         let allowed = [paths.paths().to_vec(), vec![state.clone()]].concat();
         let apply = |id: Option<&str>, connection, port| {
             let (_, store) = models::read(&root).unwrap();
+            let previous = store
+                .desktop
+                .as_ref()
+                .and_then(|applied| applied.gateway.as_ref())
+                .map(desktop_models::Selection::port);
             let port = id.and_then(|id| {
                 (desktop_connection(&store, store.model(id).unwrap().0, connection)
                     == Connection::Gateway)
                     .then_some(port)
             });
-            let changes = plan_desktop(&root, &paths, &store, id, port).unwrap();
-            let reload = changes.iter().any(|delta| !delta.at(&state));
+            let changes = plan_desktop(&root, &paths, &store, id, port, None).unwrap();
+            let reload = desktop_requires_reload(
+                &changes,
+                &state,
+                &paths.owned,
+                port.is_some() && port == previous,
+            );
             transaction::commit(&root, Client::Desktop, changes, &allowed).unwrap();
             reload
         };
@@ -1366,6 +1401,16 @@ mod tests {
         ));
         assert_eq!(read(&paths.owned), config);
         assert_eq!(models::read(&root).unwrap().1.desktop.unwrap().id, second);
+        assert!(!apply(Some(&third), Some(Connection::Gateway), default));
+        let updated = read(&paths.owned);
+        assert_eq!(
+            updated["inferenceModels"][0]["labelOverride"],
+            "other-model"
+        );
+        assert_eq!(
+            updated["inferenceGatewayApiKey"],
+            config["inferenceGatewayApiKey"]
+        );
         let alternate = 49321;
         assert!(apply(
             Some(second.as_str()),
@@ -1449,6 +1494,7 @@ mod tests {
                 &store,
                 Some(&id),
                 Some(gateway::DEFAULT_PORT),
+                None,
             )
             .unwrap(),
             &files,
@@ -1497,6 +1543,7 @@ mod tests {
                 &store,
                 Some(&id),
                 Some(gateway::DEFAULT_PORT),
+                None,
             )
             .unwrap(),
             &files,

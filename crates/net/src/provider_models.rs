@@ -1,5 +1,5 @@
 use reqwest::{Client, Url};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -9,7 +9,36 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_MODELS: usize = 2000;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct ProviderModel { pub id: String, pub name: String }
+pub struct ProviderModel {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_levels: Option<Vec<EffortLevel>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl EffortLevel {
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ProviderCatalog {
@@ -127,7 +156,34 @@ fn http_error(status: u16) -> String {
     format!("{text}（HTTP {status}）")
 }
 
-fn parse_catalog(bytes: &[u8]) -> Result<(Vec<ProviderModel>, bool, String), String> {
+fn parse_efforts(item: &Value, openrouter: bool) -> Option<Vec<EffortLevel>> {
+    let levels = EffortLevel::ALL;
+    if let Some(effort) = item.pointer("/capabilities/effort") {
+        if effort["supported"] == false {
+            return Some(Vec::new());
+        }
+        if levels.iter().any(|level| effort.get(level.as_str()).is_some()) {
+            return Some(levels.into_iter()
+                .filter(|level| effort[level.as_str()]["supported"] == true)
+                .collect());
+        }
+    }
+    let supported = if openrouter {
+        let reasoning = item.get("reasoning")?.as_object()?;
+        match reasoning.get("supported_efforts") {
+            Some(Value::Null) => return Some(levels.to_vec()),
+            Some(value) => value.as_array()?,
+            None => return Some(Vec::new()),
+        }
+    } else {
+        item.pointer("/effort/supported_levels")?.as_array()?
+    };
+    Some(levels.into_iter()
+        .filter(|level| supported.iter().any(|candidate| candidate == level.as_str()))
+        .collect())
+}
+
+fn parse_catalog(bytes: &[u8], openrouter: bool) -> Result<(Vec<ProviderModel>, bool, String), String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| "接口没有返回有效 JSON 模型列表")?;
     if value.get("error").is_some() { return Err("接口返回错误，未获取模型列表".into()); }
     let data = value.get("data").or_else(|| value.get("models")).and_then(Value::as_array).or_else(|| value.as_array()).ok_or("接口响应中没有模型列表")?;
@@ -136,7 +192,9 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<ProviderModel>, bool, String), Str
         let id = item.as_str().or_else(|| item.get("id").and_then(Value::as_str)).unwrap_or("");
         if id.is_empty() || id.len() > 256 || id.chars().any(|ch| ch.is_whitespace() || ch.is_control()) { continue; }
         let name = item.get("display_name").or_else(|| item.get("name")).and_then(Value::as_str).unwrap_or(id).chars().filter(|c| !c.is_control()).take(160).collect();
-        models.insert(id.to_string(), ProviderModel { id: id.into(), name });
+        models.insert(id.to_string(), ProviderModel {
+            id: id.into(), name, effort_levels: parse_efforts(item, openrouter),
+        });
     }
     let last = value.get("last_id").and_then(Value::as_str).or_else(|| data.last().and_then(|item| item.get("id")).and_then(Value::as_str)).unwrap_or("").to_string();
     Ok((models.into_values().collect(), value.get("has_more").and_then(Value::as_bool).unwrap_or(false) || data.len() > MAX_MODELS, last))
@@ -149,6 +207,9 @@ pub async fn fetch_provider_catalog<T: ProviderTransport + Sync>(transport: &T, 
 
 pub async fn fetch_provider_catalog_from_urls<T: ProviderTransport + Sync>(transport: &T, urls: &[String], header: (&str, &str)) -> Result<ProviderCatalog, String> {
     for (index, endpoint) in urls.iter().enumerate() {
+        let openrouter = Url::parse(endpoint).is_ok_and(|url| {
+            url.scheme() == "https" && url.host_str() == Some("openrouter.ai")
+        });
         let mut url = endpoint.clone();
         let mut models = BTreeMap::new();
         let mut cursors = Vec::new();
@@ -159,7 +220,7 @@ pub async fn fetch_provider_catalog_from_urls<T: ProviderTransport + Sync>(trans
                 if matches!(reply.status, 404 | 405) { return Err("此服务商未提供可用的模型列表接口，可继续手动填写模型 ID 并验证可用性".into()); }
                 return Err(http_error(reply.status));
             }
-            let (items, more, last) = parse_catalog(&reply.body)?;
+            let (items, more, last) = parse_catalog(&reply.body, openrouter)?;
             let secret = header.1.strip_prefix("Bearer ").unwrap_or(header.1);
             for mut item in items {
                 if !secret.is_empty() {
@@ -227,6 +288,36 @@ mod tests {
         }
     }
     fn stub(replies: Vec<(u16, Value)>) -> Stub { Stub { replies: Mutex::new(replies.into_iter().map(|(status, body)| ProviderReply { status, body: serde_json::to_vec(&body).unwrap() }).collect()), calls: Mutex::new(vec![]) } }
+
+    #[tokio::test]
+    async fn catalog_keeps_only_explicit_effort_levels() {
+        use EffortLevel::*;
+        let directory = json!({"data":[
+            {"id":"native", "capabilities":{"effort":{"supported":true, "high":{"supported":true}, "max":{"supported":true}, "low":{"supported":false}}}},
+            {"id":"disabled", "capabilities":{"effort":{"supported":false, "high":{"supported":true}}}},
+            {"id":"toggle-only", "reasoning":{"default_enabled":true}},
+            {"id":"unified", "reasoning":{"supported_efforts":["none","xhigh","low","xhigh","no-such-level"]}},
+            {"id":"unrestricted", "reasoning":{"supported_efforts":null}},
+            {"id":"undocumented", "supported_parameters":["reasoning"]}
+        ]});
+        let transport = stub(vec![(200, directory.clone()), (200, directory)]);
+        let levels = async |url| {
+            let catalog = fetch_provider_catalog(
+                &transport, &provider_base(url).unwrap(), ("x-api-key", "fixture-key")
+            ).await.unwrap();
+            catalog.models.into_iter().map(|model| (model.id, model.effort_levels)).collect::<BTreeMap<_,_>>()
+        };
+        let router = levels("https://openrouter.ai/api").await;
+        assert_eq!(router["native"], Some(vec![High, Max]));
+        assert_eq!(router["disabled"], Some(Vec::new()));
+        assert_eq!(router["toggle-only"], Some(Vec::new()));
+        assert_eq!(router["unified"], Some(vec![Low, XHigh]));
+        assert_eq!(router["unrestricted"], Some(EffortLevel::ALL.to_vec()));
+        assert_eq!(router["undocumented"], None);
+        let custom = levels("https://example.invalid/anthropic").await;
+        assert_eq!(custom["native"], Some(vec![High, Max]));
+        assert_eq!(custom["unrestricted"], None);
+    }
     #[test]
     fn catalog_routes_preserve_custom_paths_and_use_vendor_catalogs() {
         assert_eq!(provider_catalog_urls(&provider_base("https://api.deepseek.com/anthropic/v1/").unwrap()), ["https://api.deepseek.com/models"]);

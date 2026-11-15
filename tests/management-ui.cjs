@@ -119,11 +119,14 @@ async function main() {
           const model = view.models.find(model => model.id === args.id);
           if (!model?.clients.includes(client.id)) throw '模型不兼容';
           const local = args.connection === 'gateway';
+          const hot = local && client.status.local_gateway && !args.action;
           const models = client.id === 'desktop' && local && model.desktop_models?.length ? model.desktop_models : [model.model];
+          view.in_use = view.in_use.filter(id => id !== client.status.selected);
           client.status = { ...official, state: 'lite', account: '测试服务商', model: models[0], models,
             selected: model.id, can_undo: true, local_gateway: local, gateway_ready: local };
           view.in_use.push(model.id);
           if (args.action) window.launches.push([client.id, 'apply', model.id, args.action]);
+          if (hot) return `${client.name} 网关已切换模型。`;
           return desktopRestart ? restarted : client.name + ' 配置已写入。';
         }
         if (command === 'saved_model_catalog') {
@@ -638,7 +641,10 @@ async function main() {
     await page.getByRole('button', { name: '配置所选模型', exact: true }).click();
     assert.equal(await defaultId(), 'fixture-codex-alt');
     assert.equal(await page.locator('#account-picker').inputValue(), 'openai-account');
-    await page.getByRole('button', { name: '返回客户端', exact: true }).click();
+    await page.getByRole('button', { name: '保存档案', exact: true }).click();
+    await page.getByText('档案已保存。选择连接方式后，点击「应用模式」。').waitFor();
+    await page.locator('#client-model-picker').selectOption('gpt-6.1-sol-profile');
+    await page.locator('#client-connection').selectOption('gateway');
     page.once('dialog', dialog => dialog.accept());
     await page.getByRole('button', { name: '验证供应商', exact: true }).click();
     await page.getByText('模型调用通过，耗时 23 毫秒。', { exact: true }).waitFor();
@@ -652,6 +658,15 @@ async function main() {
     await client('Codex').click();
     assert.equal(await page.locator('#current-model').innerText(), 'gpt-6.1-sol');
     await client('Codex CLI').click();
+    const codexLaunches = await page.evaluate(() => window.launches.length);
+    await page.locator('#client-model-picker').selectOption('fixture-codex-alt-profile');
+    await page.locator('#apply-model.primary').click();
+    await page.getByText('Codex 网关已切换模型。', { exact: true }).waitFor();
+    assert.equal(await page.locator('#current-model').innerText(), 'fixture-codex-alt');
+    assert.deepEqual(await page.evaluate(() => window.switches.at(-1)),
+      { client: 'codex', id: 'fixture-codex-alt-profile', connection: 'gateway', action: null });
+    assert.equal(await page.evaluate(() => window.launches.length), codexLaunches);
+    assert.equal(await page.locator('#client-after-apply').isVisible(), false);
     await page.getByLabel('运行模式').selectOption('official');
     await page.getByRole('button', { name: '应用模式', exact: true }).click();
     await page.getByText('Codex 已切回官方模式。', { exact: true }).waitFor();
@@ -1028,6 +1043,18 @@ async function main() {
     assert.deepEqual(await page.evaluate(() => window.editedProfile), {
       id: 'k3.1-pro-profile', model: 'k3.1-pro', desktopModels: ['k3.1-pro', 'fixture-private-model'],
     });
+    await applyAndRestart.click();
+    await confirmRestart();
+    await restarted.waitFor();
+    const desktopLaunches = await page.evaluate(() => window.launches.length);
+    await page.locator('#client-model-picker').selectOption('deepseek-v4-pro-profile');
+    await page.locator('#apply-model.primary').click();
+    await page.getByText('Claude Desktop 网关已切换模型。', { exact: true }).waitFor();
+    assert.equal(await page.locator('#current-model').innerText(), 'deepseek-v4-pro');
+    assert.deepEqual(await page.evaluate(() => window.switches.at(-1)),
+      { client: 'desktop', id: 'deepseek-v4-pro-profile', connection: 'gateway', action: null });
+    assert.equal(await page.evaluate(() => window.launches.length), desktopLaunches);
+    assert.equal(await page.locator('#client-after-apply').isVisible(), false);
 
     assert.deepEqual(errors, []);
     console.log('codeneo-lite UI: model library filters, model setup and undo, native launch, MCP edit and verification, usage, and narrow layout passed.');

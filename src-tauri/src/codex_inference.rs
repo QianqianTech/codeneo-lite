@@ -2,7 +2,17 @@
 use crate::{model_transport, models, vault};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+type DigestBytes = [u8; 32];
+type ReasoningOwner = (DigestBytes, DigestBytes);
+const MAX_REASONING_ITEMS: usize = 4096;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Selection {
@@ -28,19 +38,18 @@ impl Selection {
         fingerprint: &str,
         previous: Option<&Self>,
     ) -> Result<Self, String> {
-        if let Some(previous) = previous.filter(|s| {
-            s.profile_id == profile_id
-                && s.fingerprint == fingerprint
-                && gateway_key(root, s.reference()).is_ok()
-        }) {
-            return Ok(previous.clone());
-        }
-        let key = format!("{}{}", vault::id()?, vault::id()?);
+        let sealed_key = match previous.filter(|s| gateway_key(root, s.reference()).is_ok()) {
+            Some(previous) => previous.sealed_key.clone(),
+            None => {
+                let key = format!("{}{}", vault::id()?, vault::id()?);
+                URL_SAFE_NO_PAD.encode(vault::protect(root, key.as_bytes())?)
+            }
+        };
         Ok(Self {
             profile_id: profile_id.into(),
             fingerprint: fingerprint.into(),
-            sealed_key: URL_SAFE_NO_PAD.encode(vault::protect(root, key.as_bytes())?),
-            port: None,
+            sealed_key,
+            port: previous.and_then(|selection| selection.port),
         })
     }
 
@@ -97,10 +106,24 @@ impl Route {
         })
     }
 
+    fn context_scope(&self) -> DigestBytes {
+        let mut digest = Sha256::new();
+        for field in [
+            self.endpoint.as_str(),
+            &self.model,
+            &self.upstream_key,
+            &self.key,
+        ] {
+            digest.update((field.len() as u64).to_le_bytes());
+            digest.update(field.as_bytes());
+        }
+        digest.finalize().into()
+    }
+
     pub(crate) fn request(
         &self,
         client: &reqwest::Client,
-        payload: &serde_json::Value,
+        payload: &Value,
     ) -> reqwest::RequestBuilder {
         client
             .post(self.endpoint.clone())
@@ -114,5 +137,94 @@ impl Route {
                 },
             )
             .json(payload)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ReasoningHistory {
+    owners: BTreeSet<ReasoningOwner>,
+    order: VecDeque<ReasoningOwner>,
+}
+
+fn reasoning_digest(item: &Value) -> Option<DigestBytes> {
+    let kind = item["type"].as_str()?;
+    if !matches!(kind, "reasoning" | "compaction") {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(kind.as_bytes());
+    if let Some(opaque) = item["encrypted_content"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        digest.update(opaque.as_bytes());
+    } else {
+        digest.update(item["summary"].to_string());
+        digest.update([0]);
+        digest.update(item["content"].to_string());
+    }
+    Some(digest.finalize().into())
+}
+
+impl ReasoningHistory {
+    fn remember(&mut self, scope: DigestBytes, item: &Value) {
+        if let Some(digest) = reasoning_digest(item) {
+            let owner = (scope, digest);
+            if self.owners.insert(owner) {
+                self.order.push_back(owner);
+                if self.order.len() > MAX_REASONING_ITEMS {
+                    self.owners.remove(&self.order.pop_front().unwrap());
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct ReasoningScope {
+    history: Arc<Mutex<ReasoningHistory>>,
+    route: DigestBytes,
+}
+
+impl ReasoningScope {
+    pub(crate) fn new(history: Arc<Mutex<ReasoningHistory>>, route: &Route) -> Self {
+        Self {
+            history,
+            route: route.context_scope(),
+        }
+    }
+
+    pub(crate) fn prepare(&self, payload: &mut Value) {
+        // Codex replays its input history. Provider-issued state is reusable
+        // only on the model and account that produced it.
+        if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
+            let history = self.history.lock().expect("Codex reasoning history");
+            input.retain(|item| {
+                reasoning_digest(item)
+                    .is_none_or(|digest| history.owners.contains(&(self.route, digest)))
+            });
+        }
+    }
+
+    pub(crate) fn observe(&self, data: &[u8]) {
+        if memchr::memmem::find(data, b"\"reasoning\"").is_none()
+            && memchr::memmem::find(data, b"\"compaction\"").is_none()
+        {
+            return;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(data) else {
+            return;
+        };
+        let mut history = self.history.lock().expect("Codex reasoning history");
+        match event["type"].as_str() {
+            Some("response.output_item.done") => history.remember(self.route, &event["item"]),
+            Some("response.completed") => {
+                if let Some(output) = event["response"]["output"].as_array() {
+                    for item in output {
+                        history.remember(self.route, item);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }

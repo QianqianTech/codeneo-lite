@@ -1,6 +1,6 @@
 use crate::{
     clients::{self, DesktopFiles, OWNED},
-    desktop, desktop_inference, files,
+    desktop, desktop_effort, desktop_inference, files,
     gateway::{self, SERVICE},
     model_transport, models,
     transaction::{self, Client, Plan},
@@ -17,6 +17,12 @@ pub struct Selection {
     supplier: String,
     config_hash: String,
     allow_history: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    scoped_model_ids: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    picker_metadata: bool,
+    #[serde(default, skip_serializing_if = "desktop_effort::Catalog::is_empty")]
+    effort_catalog: desktop_effort::Catalog,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
 }
@@ -49,22 +55,30 @@ fn route(
     account: &models::Account,
     secret: String,
     names: &[String],
+    profile: Option<&str>,
+    picker_metadata: bool,
+    effort_catalog: desktop_effort::Catalog,
 ) -> Result<Arc<desktop_inference::Route>, String> {
     let mut names = names.iter();
     let model = names
         .next()
         .ok_or("请填写至少一个 Desktop 模型 ID。")?
         .clone();
+    let scope = profile.map(|profile| (profile, model.as_str()));
+    let additional_models = names
+        .cloned()
+        .map(|name| desktop_inference::GatewayModel::new(name, scope, picker_metadata))
+        .collect();
     Ok(Arc::new(desktop_inference::Route {
         profile_id: account.id.clone(),
         base: model_transport::provider_base(account.base_for(models::Protocol::Anthropic))?,
-        api_key: account.auth_for(models::Protocol::Anthropic) == claudekeeper_claude::AuthMode::ApiKey,
+        api_key: account.auth_for(models::Protocol::Anthropic)
+            == claudekeeper_claude::AuthMode::ApiKey,
         secret,
         model,
-        additional_models: names
-            .cloned()
-            .map(desktop_inference::GatewayModel::new)
-            .collect(),
+        additional_models,
+        picker_metadata,
+        effort_catalog,
     }))
 }
 
@@ -97,10 +111,33 @@ pub fn configuration(
     model: &models::Model,
     applied_id: Option<&str>,
     port: u16,
+    discovered: Option<desktop_effort::Catalog>,
 ) -> Result<(Value, Selection), String> {
     let key = gateway::desktop_key(root, true)?;
     let names = model_names(model)?;
-    let target = route(account, models::key(root, account)?, &names)?;
+    let effort_catalog = discovered.unwrap_or_else(|| {
+        previous
+            .filter(|applied| {
+                applied.id == model.id
+                    && applied.route == models::client_route(Client::Desktop, model, account)
+            })
+            .and_then(|applied| applied.gateway.as_ref())
+            .map_or_else(desktop_effort::Catalog::new, |old| old.effort_catalog.clone())
+    });
+    // Keep alias digests when upgrading the currently applied model list.
+    let scoped_model_ids = !(applied_id == Some(OWNED)
+        && previous
+            .filter(|applied| applied.id == model.id)
+            .and_then(|applied| applied.gateway.as_ref())
+            .is_some_and(|old| !old.scoped_model_ids && old.models == names));
+    let target = route(
+        account,
+        models::key(root, account)?,
+        &names,
+        scoped_model_ids.then_some(model.id.as_str()),
+        true,
+        effort_catalog.clone(),
+    )?;
     let mut config = target.desktop_config(&gateway::desktop_url(port), &key);
     let supplier = target.supplier_fingerprint();
     let mut allow_history = false;
@@ -125,6 +162,9 @@ pub fn configuration(
         supplier,
         config_hash: hash,
         allow_history,
+        scoped_model_ids,
+        picker_metadata: true,
+        effort_catalog,
         port: (port != gateway::DEFAULT_PORT).then_some(port),
     };
     Ok((config, selection))
@@ -168,7 +208,14 @@ fn applied_route(
         };
     };
     let (_, account) = store.model(&applied.id)?;
-    let route = route(account, models::key(root, account)?, &selection.models)?;
+    let route = route(
+        account,
+        models::key(root, account)?,
+        &selection.models,
+        selection.scoped_model_ids.then_some(applied.id.as_str()),
+        selection.picker_metadata,
+        selection.effort_catalog.clone(),
+    )?;
     if route.supplier_fingerprint() != selection.supplier {
         return Err("已应用的模型服务商或 API Key 已更新，请重新应用档案。".into());
     }
@@ -186,6 +233,28 @@ fn applied_route(
         allow_history: selection.allow_history,
         port,
     }))
+}
+
+pub(crate) fn direct_configuration(
+    profile: &claudekeeper_claude::Profile,
+    key: &str,
+) -> Result<Value, String> {
+    let mut config = claudekeeper_claude::desktop_gateway_config(profile, key, 0)?;
+    let base = model_transport::provider_base(&profile.base_url)?;
+    desktop_effort::annotate_direct(&base, &mut config);
+    Ok(config)
+}
+
+pub(crate) async fn discover_efforts(
+    root: &Path,
+    account: &models::Account,
+    model: &models::Model,
+) -> Result<Option<desktop_effort::Catalog>, String> {
+    let base = model_transport::provider_base(account.base_for(models::Protocol::Anthropic))?;
+    let auth = account.auth_for(models::Protocol::Anthropic);
+    let key = models::key(root, account)?;
+    let names = model_names(model)?;
+    Ok(desktop_effort::discover(&base, auth, &key, &names).await)
 }
 
 pub async fn status(root: &Path) -> Result<(bool, Option<u64>), String> {

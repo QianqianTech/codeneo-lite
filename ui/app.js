@@ -298,18 +298,20 @@ const lite = (() => {
 
     const local = supportsGateway && third && route === "gateway";
     const ready = !!profile || !third;
-    const desktopReload = id === "desktop" && launch?.restart
-      && !(local && status.local_gateway && sameDesktopModels(profile, status.models));
+    const hotSwitch = local && status.local_gateway;
+    const desktopReload = id === "desktop" && launch?.restart && !hotSwitch;
     const action = id === "desktop" && launch?.open ? (launch.restart ? "restart" : "open")
       : id === "codex" && launch?.[activeLaunch] ? activeLaunch : "";
     const apply = $("apply-model");
     apply.textContent = supportsMode ? "应用模式" : id === "workbuddy" ? "添加到 WorkBuddy" : "应用模型";
-    apply.classList.toggle("primary", !action);
-    apply.classList.toggle("secondary", !!action);
+    apply.classList.toggle("primary", hotSwitch || !action);
+    apply.classList.toggle("secondary", !hotSwitch && !!action);
     apply.disabled = locked || !ready || !!desktopReload;
     const launchButton = $("apply-client-launch");
     launchButton.hidden = !action;
     launchButton.disabled = locked || !ready;
+    launchButton.classList.toggle("primary", !hotSwitch);
+    launchButton.classList.toggle("secondary", hotSwitch);
     launchButton.dataset.action = action;
     launchButton.textContent = action === "terminal" ? "应用并启动 Codex CLI" : action === "restart" ? "应用并重启" : "应用并打开";
 
@@ -323,9 +325,9 @@ const lite = (() => {
     }
     const note = $("client-mode-note");
     const guidance = local
-      ? (id === "desktop"
-        ? "使用 CodeNeo Lite网关时请保持 Lite 运行。切换档案后，续聊会将已有对话发给当前供应商。"
-        : "网关模式使用当前档案的模型。请保持 Lite 运行。")
+      ? (hotSwitch
+        ? "点击「应用模式」后，原会话的下一条请求会使用所选档案，并将续聊上下文发给该供应商。请保持 Lite 运行。"
+        : "首次接入网关后请重新打开客户端，并保持 Lite 运行。")
       : id === "codex" && third && profile
         ? "直连会将此账号下已保存的模型加入 Codex 的模型列表。所选档案是默认模型。" : "";
     note.textContent = [guidance, desktopReload ? "当前窗口正在运行，应用此配置需要重启 Claude Desktop。" : ""].filter(Boolean).join(" ");
@@ -342,12 +344,6 @@ const lite = (() => {
       catalogPicker.disabled = $("configure-catalog-model").disabled = locked;
     }
     return { supportsMode, third };
-  }
-
-  function sameDesktopModels(profile, active) {
-    if (!profile || !active?.length) return false;
-    const models = (profile.desktop_models?.length ? profile.desktop_models : [profile.model]).map(model => model.replace(/\[1m\]$/, ""));
-    return models.length === active.length && models.every((model, i) => model === active[i]);
   }
 
   function renderClients() {
@@ -405,7 +401,11 @@ const lite = (() => {
     help.hidden = !target.help && !showInstall;
     help.dataset.install = String(!!showInstall);
     help.textContent = showInstall ? "查看安装说明 ↗" : "打开官方配置指南 ↗";
-    $("client-note").textContent = codexCli ? "与 Codex 桌面端共用用户配置。应用后启动新会话，在 /model 中选择模型。"
+    $("client-note").textContent = status.local_gateway && target.id === "desktop"
+      ? "重新打开 Claude Desktop 可刷新它的模型菜单。"
+      : status.local_gateway && target.id === "codex"
+      ? "Codex 桌面端与 CLI 共用网关档案。当前转发的模型在 Lite 中查看。"
+      : codexCli ? "与 Codex 桌面端共用用户配置。应用后启动新会话，在 /model 中选择模型。"
       : target.id === "codex" ? "与 Codex CLI 共用用户配置。完全退出并重新打开桌面应用后生效。"
       : target.id === "desktop" && !target.launch?.restart
       ? "应用后，完全退出并重新打开 Claude Desktop。"
@@ -535,6 +535,7 @@ const lite = (() => {
     if (!canApply(client(id)) || running.has(id)) return false;
     running.add(id);
     const reopen = command === "switch_model_mode" && !!args.action;
+    const hotSwitch = command === "switch_model_mode" && args.connection === "gateway" && client(id).status.local_gateway;
     const pending = reopen ? (args.action === "restart" ? "正在应用配置并重启客户端…" : "正在应用模式并启动客户端…") : "正在写入本机配置…";
     clientMessages.set(id, { kind: "pending", text: pending });
     renderClients();
@@ -547,7 +548,7 @@ const lite = (() => {
       clientMessages.set(id, {
         kind: "success",
         text: (typeof result === "string" ? result : result?.message) || "已取消等待中的切换。",
-        actionable: !reopen && ["apply_model", "apply_agent_models", "undo_model", "switch_model_mode"].includes(command),
+        actionable: !reopen && !hotSwitch && ["apply_model", "apply_agent_models", "undo_model", "switch_model_mode"].includes(command),
       });
       await refresh();
       return true;

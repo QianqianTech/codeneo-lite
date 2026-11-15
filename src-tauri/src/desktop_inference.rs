@@ -1,5 +1,5 @@
 //! Shared loopback listener for Claude Desktop Messages and Codex Responses.
-use crate::{codex_inference, files, gateway};
+use crate::{codex_inference, desktop_effort, files, gateway};
 use claudekeeper_app::diagnostics::{record, record_context, LogContext};
 use futures_util::stream;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited, StreamBody};
@@ -29,9 +29,12 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinHandle};
 
-// Keep the default route compatible with existing Desktop configurations.
+// Keep accepting the original ID for sessions and profiles saved before effort metadata.
 pub(crate) const MODEL: &str = "claude-sonnet-4-6";
+const PICKER_SUFFIX: &str = "claude";
+const PICKER_DEFAULT: &str = "gateway/default/claude";
 const MAX_REQUEST: usize = 24 * 1024 * 1024;
+const MAX_CODEX_SSE_LINE: usize = 1024 * 1024;
 const MAX_SESSIONS: usize = 512;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(300);
 const LOG_SOURCE: &str = "desktop-gateway";
@@ -43,21 +46,32 @@ pub(crate) struct GatewayModel {
 }
 
 impl GatewayModel {
-    pub(crate) fn new(upstream: String) -> Self {
+    pub(crate) fn new(upstream: String, scope: Option<(&str, &str)>, picker_metadata: bool) -> Self {
         // Desktop accepts a routing prefix before the compatibility model ID.
-        // A digest gives each upstream model a stable route regardless of order.
-        let id = format!("gateway/{:x}/{MODEL}", Sha256::digest(upstream.as_bytes()));
+        let mut digest = Sha256::new();
+        if let Some((profile, default_model)) = scope {
+            // A cached alternate from another profile or default selection
+            // should follow the new default instead of selecting its namesake.
+            for field in [profile, default_model] {
+                digest.update((field.len() as u64).to_le_bytes());
+                digest.update(field.as_bytes());
+            }
+        }
+        digest.update(upstream.as_bytes());
+        let suffix = if picker_metadata { PICKER_SUFFIX } else { MODEL };
+        let id = format!("gateway/{:x}/{suffix}", digest.finalize());
         Self { id, upstream }
     }
 
-    fn is_route_id(id: &str) -> bool {
+    fn route_digest(id: &str) -> Option<&str> {
         id.strip_prefix("gateway/")
             .and_then(|id| id.split_once('/'))
-            .is_some_and(|(digest, model)| {
-                model == MODEL
+            .filter(|(digest, model)| {
+                matches!(*model, MODEL | PICKER_SUFFIX)
                     && digest.len() == 64
                     && digest.bytes().all(|b| b.is_ascii_hexdigit())
             })
+            .map(|(digest, _)| digest)
     }
 }
 
@@ -67,13 +81,20 @@ pub(crate) struct Route {
     pub(crate) base: Url,
     pub(crate) model: String,
     pub(crate) additional_models: Vec<GatewayModel>,
+    pub(crate) picker_metadata: bool,
+    pub(crate) effort_catalog: desktop_effort::Catalog,
     pub(crate) api_key: bool,
     pub(crate) secret: String,
 }
 
 impl Route {
+    fn effort(&self, name: &str) -> Option<desktop_effort::Effort> {
+        desktop_effort::resolve(&self.base, name, &self.effort_catalog)
+    }
+
     pub(crate) fn models(&self) -> impl Iterator<Item = (&str, &str)> {
-        std::iter::once((MODEL, self.model.as_str())).chain(
+        let primary = if self.picker_metadata { PICKER_DEFAULT } else { MODEL };
+        std::iter::once((primary, self.model.as_str())).chain(
             self.additional_models
                 .iter()
                 .map(|model| (model.id.as_str(), model.upstream.as_str())),
@@ -83,7 +104,17 @@ impl Route {
     pub(crate) fn desktop_config(&self, url: &str, key: &str) -> Value {
         let models: Vec<_> = self
             .models()
-            .map(|(id, name)| json!({ "name": id, "labelOverride": name }))
+            .map(|(id, name)| {
+                let mut entry = json!({ "name": id, "labelOverride": name });
+                if self.picker_metadata {
+                    // A versionless alias does not advertise a Claude model's
+                    // effort levels when the real model has none.
+                    if let Some(effort) = self.effort(name) {
+                        effort.annotate(&mut entry);
+                    }
+                }
+                entry
+            })
             .collect();
         json!({
             "inferenceProvider": "gateway",
@@ -102,7 +133,6 @@ impl Route {
         self.fingerprint_for_model(&self.model)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn fingerprint_for_model(&self, model: &str) -> String {
         self.digest(Some(model))
     }
@@ -130,6 +160,8 @@ impl Route {
 struct SessionBinding {
     session: String,
     supplier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     awaiting_recovery: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -137,24 +169,35 @@ struct SessionBinding {
 }
 
 impl SessionBinding {
-    fn new(session: String, supplier: String) -> Self {
+    fn new(session: String, supplier: String, model_fingerprint: Option<String>) -> Self {
         Self {
             session,
             supplier,
+            model_fingerprint,
             awaiting_recovery: false,
             thinking_suppliers: BTreeMap::new(),
         }
     }
 
-    fn prepare_history(&self, request: &mut Value, supplier: &str) -> Option<Self> {
-        let previous = (!self.awaiting_recovery).then_some(self.supplier.as_str());
-        let changed = previous != Some(supplier);
-        if !changed && self.thinking_suppliers.is_empty() {
+    fn prepare_history(&self, request: &mut Value, supplier: &str, model: &str) -> Option<Self> {
+        let previous_supplier = (!self.awaiting_recovery).then_some(self.supplier.as_str());
+        let previous_model = previous_supplier.and(self.model_fingerprint.as_deref());
+        let changed = previous_supplier != Some(supplier)
+            || previous_model.is_some_and(|previous| previous != model);
+        let update = changed || previous_model.is_none();
+        if !update && self.thinking_suppliers.is_empty() {
             return None;
         }
-        let mut updated = changed.then(|| Self {
+        let previous_owner = previous_model.or(if changed {
+            previous_supplier
+        } else {
+            Some(model)
+        });
+        let belongs_to_current = |owner: &str| owner == model || owner == supplier;
+        let mut updated = update.then(|| Self {
             session: self.session.clone(),
             supplier: supplier.into(),
+            model_fingerprint: Some(model.into()),
             awaiting_recovery: false,
             thinking_suppliers: self.thinking_suppliers.clone(),
         });
@@ -175,12 +218,12 @@ impl SessionBinding {
                         let owner = updated
                             .thinking_suppliers
                             .entry(digest)
-                            .or_insert_with(|| previous.map(str::to_owned));
-                        return owner.as_deref() == Some(supplier);
+                            .or_insert_with(|| previous_owner.map(str::to_owned));
+                        return owner.as_deref().is_some_and(belongs_to_current);
                     }
                     self.thinking_suppliers
                         .get(&digest)
-                        .is_none_or(|owner| owner.as_deref() == Some(supplier))
+                        .is_none_or(|owner| owner.as_deref().is_some_and(belongs_to_current))
                 });
                 !content.is_empty() || original_len == 0
             });
@@ -223,25 +266,6 @@ fn tool_continuation_without_thinking(request: &Value) -> bool {
             content.iter().any(|block| block["type"] == "tool_use")
                 && !content.iter().any(|block| block["type"] == "thinking")
         })
-}
-
-fn normalize_glm_effort(base: &Url, model: &str, request: &mut Value) -> bool {
-    if model != "glm-5.3"
-        || !crate::models::is_aliyun_token_plan(base)
-        || base.path().trim_end_matches('/') != "/apps/anthropic"
-    {
-        return false;
-    }
-    let Some(Value::String(effort)) = request.pointer_mut("/output_config/effort") else {
-        return false;
-    };
-    // Model Studio's Anthropic endpoint supports low, high and max for GLM-5.3.
-    *effort = match effort.as_str() {
-        "medium" => "high".into(),
-        "xhigh" => "max".into(),
-        _ => return false,
-    };
-    true
 }
 
 struct PendingSession {
@@ -350,7 +374,7 @@ impl Routing {
             .recovery(route)
             .filter(|pending| pending.request == request)
             .ok_or("待接续会话已变更或过期，请在 Desktop 重试该会话，再刷新状态。")?;
-        let mut binding = SessionBinding::new(pending.session.clone(), pending.supplier.clone());
+        let mut binding = SessionBinding::new(pending.session.clone(), pending.supplier.clone(), None);
         binding.awaiting_recovery = true;
         self.bind(binding);
         Ok(())
@@ -393,21 +417,26 @@ impl Routing {
             .as_ref()
             .and_then(|key| self.sessions.iter().find(|binding| binding.session == *key));
         let requested = request["model"].as_str().unwrap_or_default();
+        let digest = GatewayModel::route_digest(requested);
         let model = route
             .models()
-            .find(|(id, _)| *id == requested)
+            .find(|(id, _)| {
+                *id == requested
+                    || digest.is_some_and(|digest| GatewayModel::route_digest(id) == Some(digest))
+            })
             .map(|(_, name)| name)
-            // A resumed thread can still carry a model ID from a previous list.
+            // A running Desktop can send a cached gateway model ID even in a new thread.
             .or_else(|| {
-                ((!fresh || binding.is_some()) && GatewayModel::is_route_id(requested))
+                (matches!(requested, MODEL | PICKER_DEFAULT) || digest.is_some())
                     .then_some(route.model.as_str())
             })
             .ok_or(RouteError::UnknownModel)?
             .to_owned();
+        let model_fingerprint = route.fingerprint_for_model(&model);
         if let Some(binding) =
             binding.filter(|binding| !binding.awaiting_recovery || binding.supplier == supplier)
         {
-            let updated = binding.prepare_history(request, &supplier);
+            let updated = binding.prepare_history(request, &supplier, &model_fingerprint);
             if updated.is_some() && inference {
                 log.record(
                     "info",
@@ -463,7 +492,7 @@ impl Routing {
             }
         }
         if let Some(key) = session.filter(|_| inference) {
-            self.bind(SessionBinding::new(key, supplier));
+            self.bind(SessionBinding::new(key, supplier, Some(model_fingerprint)));
         }
         Ok(RoutedRequest {
             route,
@@ -577,6 +606,7 @@ impl Service {
             key: key.to_owned(),
             routing: routing.clone(),
             codex_route: codex_route.clone(),
+            codex_reasoning: Arc::default(),
             requests: Arc::new(Semaphore::new(12)),
         });
         let task = tokio::spawn(async move {
@@ -719,6 +749,7 @@ struct Gateway {
     key: String,
     routing: Arc<Mutex<Routing>>,
     codex_route: Arc<Mutex<Option<Arc<codex_inference::Route>>>>,
+    codex_reasoning: Arc<Mutex<codex_inference::ReasoningHistory>>,
     requests: Arc<Semaphore>,
 }
 
@@ -816,12 +847,18 @@ struct SseEvents {
     long_line: bool,
     stopped: bool,
     failed: bool,
+    codex_reasoning: Option<codex_inference::ReasoningScope>,
 }
 
 impl SseEvents {
     fn observe(&mut self, bytes: &[u8]) {
+        let limit = if self.codex_reasoning.is_some() {
+            MAX_CODEX_SSE_LINE
+        } else {
+            64
+        };
         for part in bytes.split_inclusive(|&byte| byte == b'\n') {
-            if self.line.len() + part.len() > 64 {
+            if self.line.len() + part.len() > limit {
                 self.long_line = true;
             }
             if !self.long_line {
@@ -835,6 +872,13 @@ impl SseEvents {
                             self.failed = true
                         }
                         _ => {}
+                    }
+                    if let Some((reasoning, data)) = self
+                        .codex_reasoning
+                        .as_ref()
+                        .zip(self.line.strip_prefix(b"data:"))
+                    {
+                        reasoning.observe(data.trim_ascii());
                     }
                 }
                 self.line.clear();
@@ -1033,12 +1077,12 @@ impl Gateway {
             }
         };
         let wants_stream = payload["stream"] == true;
-        if normalize_glm_effort(&route.base, &model, &mut payload) {
+        if inference && route.effort(&model).is_some_and(|effort| effort.adapt(&mut payload)) {
             log.record(
                 "info",
                 "上游请求",
-                "GLM_EFFORT_NORMALIZED",
-                "已将思考强度映射为百炼 GLM-5.3 支持的值。",
+                "DESKTOP_EFFORT_MAPPED",
+                "已将思考强度映射为当前模型支持的档位。",
             );
         }
         payload["model"] = json!(model);
@@ -1078,7 +1122,7 @@ impl Gateway {
             route,
             binding,
         });
-        forward_response(request, wants_stream, permit, log, verify).await
+        forward_response(request, wants_stream, permit, log, verify, None).await
     }
 
     async fn forward_codex(
@@ -1104,7 +1148,7 @@ impl Gateway {
             return log.reject(
                 StatusCode::UNAUTHORIZED,
                 "CODEX_GATEWAY_AUTH",
-                "Codex 网关档案已变更或凭据无效。请重新打开 Codex 或启动新会话。",
+                "Codex 网关凭据无效。请在 Lite 核对连接方式后重新打开 Codex。",
             );
         };
         let Ok(permit) = self.requests.clone().try_acquire_owned() else {
@@ -1114,21 +1158,35 @@ impl Gateway {
                 "CodeNeo Lite网关请求过多",
             );
         };
-        let payload = match inference_payload(body, &log).await {
+        let mut payload = match inference_payload(body, &log).await {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        if payload["model"].as_str() != Some(route.model.as_str()) {
+        if !payload["model"].as_str().is_some_and(|model| {
+            crate::model_transport::provider_api_model(model).is_ok_and(|model| !model.is_empty())
+        }) {
             return log.reject(
                 StatusCode::BAD_REQUEST,
                 "CODEX_GATEWAY_MODEL",
-                "此模型与已应用的 Codex 档案不符。请使用档案中的模型或新建会话。",
+                "Codex 网关请求缺少有效的模型 ID。",
             );
         }
+        // Codex can keep the old model ID for the lifetime of its thread.
+        payload["model"] = json!(route.model);
+        let reasoning = codex_inference::ReasoningScope::new(self.codex_reasoning.clone(), &route);
+        reasoning.prepare(&mut payload);
         // The request retains the authorized route even if the active profile
         // changes while its response is streaming.
         let request = route.request(&self.client, &payload);
-        forward_response(request, payload["stream"] == true, permit, log, None).await
+        forward_response(
+            request,
+            payload["stream"] == true,
+            permit,
+            log,
+            None,
+            Some(reasoning),
+        )
+        .await
     }
 }
 
@@ -1225,6 +1283,7 @@ async fn forward_response(
     permit: tokio::sync::OwnedSemaphorePermit,
     log: RequestLog,
     verify: Option<DesktopResponse>,
+    codex_reasoning: Option<codex_inference::ReasoningScope>,
 ) -> Response<Body> {
     let response = match request.send().await {
         Ok(response) => response,
@@ -1274,7 +1333,10 @@ async fn forward_response(
         log,
         has_data: false,
         expected_format,
-        sse: stream.then(SseEvents::default),
+        sse: stream.then(|| SseEvents {
+            codex_reasoning,
+            ..SseEvents::default()
+        }),
     };
     let frames = stream::unfold(Some(forwarding), |state| async move {
         let mut state = state?;
@@ -1318,7 +1380,7 @@ mod tests {
     fn adapts_desktop_effort_for_glm_on_token_plan_without_changing_history() {
         let token_plan =
             Url::parse("https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic").unwrap();
-        let other = Url::parse("https://example.invalid/apps/anthropic").unwrap();
+        let effort = desktop_effort::resolve(&token_plan, "glm-5.3", &Default::default()).unwrap();
         let request = json!({
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "medium", "format": {"type": "json_schema"}},
@@ -1328,19 +1390,55 @@ mod tests {
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_fixture", "content": "Finished."}]},
             ]
         });
-        let mut adapted = request.clone();
-        assert!(!normalize_glm_effort(&token_plan, "qwen4-max-preview", &mut adapted));
-        assert!(!normalize_glm_effort(&other, "glm-5.3", &mut adapted));
-        assert_eq!(adapted, request);
-
         for (from, to) in [("medium", "high"), ("xhigh", "max")] {
             let mut source = request.clone();
             source["output_config"]["effort"] = json!(from);
-            assert!(normalize_glm_effort(&token_plan, "glm-5.3", &mut source));
+            assert!(effort.adapt(&mut source));
             let mut expected = request.clone();
             expected["output_config"]["effort"] = json!(to);
             assert_eq!(source, expected);
-            assert!(!normalize_glm_effort(&token_plan, "glm-5.3", &mut source));
+            assert!(!effort.adapt(&mut source));
+        }
+    }
+
+    #[test]
+    fn effort_picker_keeps_each_models_route_and_accepts_cached_model_ids() {
+        let data = tempfile::tempdir().unwrap();
+        let mut routing = Routing::open(&data.path().join("sessions.json"));
+        let primary = "qwen4-max-preview";
+        let alternate = "glm-5.3";
+        let scope = Some(("fixture-profile", primary));
+        let legacy = GatewayModel::new(alternate.into(), scope, false);
+        let current = GatewayModel::new(alternate.into(), scope, true);
+        let mut route = profile(
+            primary,
+            Url::parse("https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic").unwrap(),
+        );
+        let target = Arc::get_mut(&mut route).unwrap();
+        target.picker_metadata = true;
+        target.additional_models = vec![
+            GatewayModel::new("auto".into(), scope, true),
+            current.clone(),
+        ];
+        let config = target.desktop_config("http://127.0.0.1:1", "local-only");
+        let entries = config["inferenceModels"].as_array().unwrap();
+        assert_eq!(entries[0]["name"], PICKER_DEFAULT);
+        assert_eq!(entries[0]["maxEffort"], "xhigh");
+        assert!(entries[1].get("behavesAs").is_none());
+        assert!(entries[1].get("maxEffort").is_none());
+        assert_eq!(entries[2]["name"], current.id);
+        assert_eq!(entries[2]["maxEffort"], "max");
+
+        routing.active = Some(route);
+        let log = RequestLog::new(&Method::POST, "/v1/messages");
+        for (id, model) in [
+            (MODEL, primary),
+            (PICKER_DEFAULT, primary),
+            (legacy.id.as_str(), alternate),
+            (current.id.as_str(), alternate),
+        ] {
+            let mut request = json!({"model":id, "messages":[{"role":"user","content":"fixture"}]});
+            assert_eq!(routing.route(&mut request, true, &log).ok().unwrap().model, model);
         }
     }
 
@@ -1512,14 +1610,63 @@ mod tests {
             profile_id: model.into(),
             base,
             model: model.into(),
-            additional_models: vec![GatewayModel::new(format!("{model}-alt"))],
+            additional_models: vec![GatewayModel::new(format!("{model}-alt"), Some((model, model)), false)],
+            picker_metadata: false,
+            effort_catalog: Default::default(),
             api_key: false,
             secret: format!("{model}-secret"),
         })
     }
 
     #[tokio::test]
-    async fn codex_responses_stream_stays_on_its_supplier_when_the_profile_changes() {
+    async fn desktop_effort_reaches_the_selected_upstream_model() {
+        use crate::model_transport::EffortLevel;
+        let upstream = upstream("fixture", None, |data| {
+            assert_eq!(data["model"], "fixture-alt");
+            assert_eq!(data["output_config"]["effort"], "xhigh");
+            assert_eq!(data["output_config"]["format"]["type"], "json_schema");
+        })
+        .await;
+        let mut route = profile("fixture", upstream);
+        let target = Arc::get_mut(&mut route).unwrap();
+        target.picker_metadata = true;
+        let alternate = GatewayModel::new("fixture-alt".into(), Some(("fixture", "fixture")), true);
+        let selected = alternate.id.clone();
+        target.additional_models = vec![alternate];
+        target.effort_catalog.insert(
+            "fixture-alt".into(),
+            vec![EffortLevel::Low, EffortLevel::XHigh],
+        );
+        let storage = tempfile::tempdir().unwrap();
+        let mut service = Service::new();
+        let address = service
+            .bind("fixture-gateway-key", 0, &storage.path().join("sessions.json"))
+            .await
+            .unwrap();
+        service.select(Some(route), false);
+        let response = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/v1/messages"))
+            .header("x-api-key", "fixture-gateway-key")
+            .json(&json!({
+                "model": selected,
+                "stream": true,
+                "messages": [{"role":"user","content":"test"}],
+                "output_config": {"effort":"high","format":{"type":"json_schema"}}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.text().await.unwrap().contains("data: fixture-alt"));
+    }
+
+    #[tokio::test]
+    async fn codex_keeps_the_active_stream_and_routes_the_next_request_with_the_old_client_config()
+    {
         let data = tempfile::tempdir().unwrap();
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = Url::parse(&format!(
@@ -1576,6 +1723,46 @@ mod tests {
                 .await
                 .unwrap();
         });
+        let upstream_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint_b = Url::parse(&format!(
+            "http://{}/v1/responses",
+            upstream_b.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server_b = tokio::spawn(async move {
+            let (socket, _) = upstream_b.accept().await.unwrap();
+            let handler = service_fn(|request: Request<Incoming>| async move {
+                assert_eq!(request.uri().path(), "/v1/responses");
+                assert_eq!(
+                    request.headers()["authorization"],
+                    "Bearer fixture-provider-b"
+                );
+                let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                let input: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(input["model"], "other-model");
+                assert_eq!(
+                    input["input"],
+                    json!([
+                        {"role": "user", "content": "test prompt"},
+                        {"role": "assistant", "content": "OK"},
+                        {"role": "user", "content": "follow up"}
+                    ])
+                );
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Full::new(Bytes::from_static(
+                            b"event: response.completed\ndata: {\"id\":\"upstream-b\"}\n\n",
+                        )))
+                        .unwrap(),
+                )
+            });
+            http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(TokioIo::new(socket), handler)
+                .await
+                .unwrap();
+        });
         let mut service = Service::new();
         let address = service
             .bind("fixture-desktop-key", 0, &data.path().join("sessions.json"))
@@ -1585,28 +1772,30 @@ mod tests {
         let desktop = profile("fixture-desktop", endpoint.clone());
         service.select(Some(desktop.clone()), false);
         assert!(service.is_ready());
-        let codex = |key: &str, upstream_key: &str| {
+        let codex = |endpoint, model: &str, upstream_key: &str| {
             Arc::new(codex_inference::Route {
-                endpoint: endpoint.clone(),
-                model: "fixture-model".into(),
-                key: key.into(),
+                endpoint,
+                model: model.into(),
+                key: "fixture-local-a".into(),
                 upstream_key: upstream_key.into(),
             })
         };
-        let first = codex("fixture-local-a", "fixture-provider-a");
-        let second = codex("fixture-local-b", "fixture-provider-b");
+        let first = codex(endpoint, "fixture-model", "fixture-provider-a");
+        let second = codex(endpoint_b, "other-model", "fixture-provider-b");
         service.select_codex(Some(first));
         let client = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let call = |key: &str, model: &str| {
-            client.post(format!("http://{address}{}", gateway::CODEX_RESPONSES))
-            .bearer_auth(key).json(&json!({"model": model, "input": "test prompt", "store": false, "stream": true}))
+        let call = |key: &str, model: &str, input: Value| {
+            client
+                .post(format!("http://{address}{}", gateway::CODEX_RESPONSES))
+                .bearer_auth(key)
+                .json(&json!({"model": model, "input": input, "store": false, "stream": true}))
         };
         assert_eq!(
-            call("fixture-desktop-key", "fixture-model")
+            call("fixture-desktop-key", "fixture-model", json!("test prompt"))
                 .send()
                 .await
                 .unwrap()
@@ -1614,14 +1803,14 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            call("fixture-local-a", "other-model")
+            call("fixture-local-a", "", json!("test prompt"))
                 .send()
                 .await
                 .unwrap()
                 .status(),
             StatusCode::BAD_REQUEST
         );
-        let mut old = call("fixture-local-a", "fixture-model")
+        let mut old = call("fixture-local-a", "fixture-model", json!("test prompt"))
             .send()
             .await
             .unwrap();
@@ -1632,13 +1821,26 @@ mod tests {
         assert!(service.is_serving(&desktop));
         assert!(service.is_serving_codex(&second));
         assert_eq!(
-            call("fixture-local-a", "fixture-model")
+            call("unrecognized-key", "fixture-model", json!("test prompt"))
                 .send()
                 .await
                 .unwrap()
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+        let continued = call(
+            "fixture-local-a",
+            "fixture-model",
+            json!([
+                {"role": "user", "content": "test prompt"},
+                {"role": "assistant", "content": "OK"},
+                {"role": "user", "content": "follow up"}
+            ]),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert!(continued.text().await.unwrap().contains("upstream-b"));
         let desktop_models = client
             .get(format!("http://{address}/v1/models"))
             .bearer_auth("fixture-desktop-key")
@@ -1651,21 +1853,43 @@ mod tests {
         );
         gate.notify_one();
         assert!(old.text().await.unwrap().contains("response.completed"));
-        tokio::time::timeout(Duration::from_secs(5), server)
-            .await
-            .unwrap()
-            .unwrap();
+        for server in [server, server_b] {
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
         service.select(None, false);
         assert!(service.is_ready());
         service.select_codex(None);
         assert!(!service.is_ready());
     }
 
-    // Run with CODENEO_TEST_CODEX set to a native CLI binary. The whole turn
-    // uses a fixture provider and records usage in a temporary CODEX_HOME.
+    // Run with CODENEO_TEST_CODEX set to a native CLI binary. All turns
+    // use a fixture provider and a temporary CODEX_HOME.
     #[tokio::test]
     #[ignore = "requires an installed Codex CLI"]
-    async fn native_codex_completes_a_turn_through_the_gateway() {
+    async fn native_codex_continues_a_thread_after_gateway_switch() {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        async fn event(
+            output: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+            matches: impl Fn(&Value) -> bool,
+        ) -> Value {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let line = output.next_line().await.unwrap().expect("Codex exited");
+                    let message = serde_json::from_str(&line).unwrap();
+                    if matches(&message) {
+                        return message;
+                    }
+                }
+            })
+            .await
+            .expect("waiting for Codex app-server")
+        }
+
         let binary = std::env::var_os("CODENEO_TEST_CODEX").expect("set CODENEO_TEST_CODEX");
         let fixture = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1674,53 +1898,85 @@ mod tests {
             listener.local_addr().unwrap()
         ))
         .unwrap();
+        let turns = [
+            (
+                "fixture-model",
+                "fixture-upstream-a",
+                "CODENEO-GATEWAY-FIRST",
+            ),
+            (
+                "other-model",
+                "fixture-upstream-b",
+                "CODENEO-GATEWAY-SECOND",
+            ),
+            ("other-model", "fixture-upstream-b", "CODENEO-GATEWAY-THIRD"),
+        ];
         let provider = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let handler = service_fn(move |req: Request<Incoming>| async move {
-                assert_eq!(req.uri().path(), "/v1/responses");
-                assert_eq!(req.headers()["authorization"], "Bearer fixture-upstream");
-                let body = req.into_body().collect().await.unwrap().to_bytes();
-                let input: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(input["model"], "fixture-model");
-                assert_eq!(input["stream"], true);
-                let response = json!({"id":"resp_fixture", "object":"response", "created_at":0,
-                    "model":"fixture-model", "status":"in_progress", "output":[]});
-                let message = json!({"id":"msg_fixture", "type":"message", "role":"assistant", "status":"completed",
-                    "content":[{"type":"output_text","text":"CODENEO-GATEWAY-FIXTURE-OK","annotations":[]}]});
-                let mut complete = response.clone();
-                complete["status"] = json!("completed");
-                complete["output"] = json!([message]);
-                complete["usage"] = json!({"input_tokens":5,"output_tokens":5,"total_tokens":10,
+            for (index, (model, key, reply)) in turns.into_iter().enumerate() {
+                let (socket, _) = listener.accept().await.unwrap();
+                let handler = service_fn(move |req: Request<Incoming>| async move {
+                    assert_eq!(req.uri().path(), "/v1/responses");
+                    assert_eq!(req.headers()["authorization"], format!("Bearer {key}"));
+                    let body = req.into_body().collect().await.unwrap().to_bytes();
+                    let input: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(input["model"], model);
+                    assert_eq!(input["stream"], true);
+                    assert_eq!(input["store"], false);
+                    if index > 0 {
+                        let history = input["input"].to_string();
+                        assert!(history.contains("First fixture prompt"));
+                        assert!(history.contains("CODENEO-GATEWAY-FIRST"));
+                        assert!(history.contains("Second fixture prompt"));
+                        assert!(!history.contains("opaque-fixture-0"));
+                        if index == 2 {
+                            assert!(history.contains("CODENEO-GATEWAY-SECOND"));
+                            assert!(history.contains("opaque-fixture-1"));
+                        }
+                    }
+                    let response_id = format!("resp_fixture_{index}");
+                    let message_id = format!("msg_fixture_{index}");
+                    let response = json!({"id":response_id, "object":"response", "created_at":0,
+                    "model":model, "status":"in_progress", "output":[]});
+                    let message = json!({"id":message_id, "type":"message", "role":"assistant", "status":"completed",
+                    "content":[{"type":"output_text","text":reply,"annotations":[]}]});
+                    let reasoning = json!({"id":format!("rs_fixture_{index}"),"type":"reasoning",
+                    "summary":[],"encrypted_content":format!("opaque-fixture-{index}")});
+                    let mut complete = response.clone();
+                    complete["status"] = json!("completed");
+                    complete["output"] = json!([reasoning, message]);
+                    complete["usage"] = json!({"input_tokens":5,"output_tokens":5,"total_tokens":10,
                     "input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":1}});
-                let events = [
-                    json!({"type":"response.created", "response":response}),
-                    json!({"type":"response.output_item.added", "output_index":0,
-                        "item":{"id":"msg_fixture","type":"message","role":"assistant","status":"in_progress","content":[]}}),
-                    json!({"type":"response.output_text.delta", "item_id":"msg_fixture","output_index":0,"content_index":0,"delta":"CODENEO-GATEWAY-FIXTURE-OK"}),
-                    json!({"type":"response.output_item.done", "output_index":0,"item":message}),
-                    json!({"type":"response.completed", "response":complete}),
-                ];
-                let text: String = events
-                    .iter()
-                    .map(|event| {
-                        format!(
-                            "event: {}\ndata: {event}\n\n",
-                            event["type"].as_str().unwrap()
-                        )
-                    })
-                    .collect();
-                Ok::<_, Infallible>(
-                    Response::builder()
-                        .header("content-type", "text/event-stream")
-                        .body(Full::new(Bytes::from(text)))
-                        .unwrap(),
-                )
-            });
-            http1::Builder::new()
-                .keep_alive(false)
-                .serve_connection(TokioIo::new(socket), handler)
-                .await
-                .unwrap();
+                    let events = [
+                        json!({"type":"response.created", "response":response}),
+                        json!({"type":"response.output_item.done", "output_index":0, "item":reasoning}),
+                        json!({"type":"response.output_item.added", "output_index":1,
+                        "item":{"id":message_id,"type":"message","role":"assistant","status":"in_progress","content":[]}}),
+                        json!({"type":"response.output_text.delta", "item_id":message_id,"output_index":1,"content_index":0,"delta":reply}),
+                        json!({"type":"response.output_item.done", "output_index":1,"item":message}),
+                        json!({"type":"response.completed", "response":complete}),
+                    ];
+                    let text: String = events
+                        .iter()
+                        .map(|event| {
+                            format!(
+                                "event: {}\ndata: {event}\n\n",
+                                event["type"].as_str().unwrap()
+                            )
+                        })
+                        .collect();
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(Full::new(Bytes::from(text)))
+                            .unwrap(),
+                    )
+                });
+                http1::Builder::new()
+                    .keep_alive(false)
+                    .serve_connection(TokioIo::new(socket), handler)
+                    .await
+                    .unwrap();
+            }
         });
         let mut service = Service::new();
         let address = service
@@ -1731,12 +1987,15 @@ mod tests {
             )
             .await
             .unwrap();
-        service.select_codex(Some(Arc::new(codex_inference::Route {
-            endpoint,
-            model: "fixture-model".into(),
-            key: "fixture-codex-key".into(),
-            upstream_key: "fixture-upstream".into(),
-        })));
+        let select = |model: &str, key: &str| {
+            service.select_codex(Some(Arc::new(codex_inference::Route {
+                endpoint: endpoint.clone(),
+                model: model.into(),
+                key: "fixture-codex-key".into(),
+                upstream_key: key.into(),
+            })));
+        };
+        select(turns[0].0, turns[0].1);
         fs::write(
             fixture.path().join("config.toml"),
             format!(
@@ -1760,47 +2019,103 @@ args = ["%s", "fixture-codex-key"]
         .unwrap();
         let work = fixture.path().join("work");
         fs::create_dir(&work).unwrap();
-        let mut command = tokio::process::Command::new(binary);
-        command
+        let mut codex = tokio::process::Command::new(binary)
             .env_clear()
             .env("HOME", fixture.path())
             .env("CODEX_HOME", fixture.path())
             .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
-            .current_dir(work)
+            .current_dir(&work)
             .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .args([
                 "--strict-config",
-                "-a",
-                "never",
-                "exec",
-                "-s",
-                "read-only",
-                "--skip-git-repo-check",
-                "--color",
-                "never",
-                "--json",
+                "app-server",
                 "--disable",
                 "apps",
                 "--disable",
                 "plugins",
-                "Reply with the fixture text.",
-            ]);
-        let output = tokio::time::timeout(Duration::from_secs(20), command.output())
+            ])
+            .spawn()
+            .unwrap();
+        let mut input = codex.stdin.take().unwrap();
+        let mut output = BufReader::new(codex.stdout.take().unwrap()).lines();
+        let send = async |input: &mut tokio::process::ChildStdin, message: Value| {
+            input
+                .write_all(format!("{message}\n").as_bytes())
+                .await
+                .unwrap();
+        };
+        send(
+            &mut input,
+            json!({"id": 1, "method": "initialize", "params": {
+                "clientInfo": {"name": "codeneo-lite-fixture", "version": "0.1.0"}
+            }}),
+        )
+        .await;
+        assert!(event(&mut output, |message| message["id"] == 1)
+            .await
+            .get("result")
+            .is_some());
+        send(&mut input, json!({"method": "initialized"})).await;
+        send(
+            &mut input,
+            json!({"id": 2, "method": "thread/start", "params": {
+                "cwd": work, "approvalPolicy": "never", "sandbox": "read-only"
+            }}),
+        )
+        .await;
+        let thread = event(&mut output, |message| message["id"] == 2).await;
+        let thread_id = thread["result"]["thread"]["id"]
+            .as_str()
+            .expect("thread started");
+        let prompts = [
+            "First fixture prompt",
+            "Second fixture prompt",
+            "Third fixture prompt",
+        ];
+        for (index, prompt) in prompts.into_iter().enumerate() {
+            let (model, key, reply) = turns[index];
+            select(model, key);
+            let id = index + 3;
+            send(
+                &mut input,
+                json!({"id": id, "method": "turn/start", "params": {
+                    "threadId": thread_id, "input": [{"type": "text", "text": prompt}]
+                }}),
+            )
+            .await;
+            let started = event(&mut output, |message| message["id"] == id).await;
+            let turn = started["result"]["turn"]["id"]
+                .as_str()
+                .expect("turn started");
+            let output_item = event(&mut output, |message| {
+                message["params"]["turnId"] == turn
+                    && (message["method"] == "item/completed"
+                        && message["params"]["item"]["type"] == "agentMessage")
+            })
+            .await;
+            assert_eq!(output_item["params"]["item"]["text"], reply);
+            let completed = event(&mut output, |message| {
+                message["method"] == "turn/completed" && message["params"]["turn"]["id"] == turn
+            })
+            .await;
+            assert_eq!(completed["params"]["threadId"], thread_id);
+            assert_eq!(completed["params"]["turn"]["status"], "completed");
+        }
+        drop(input);
+        assert!(tokio::time::timeout(Duration::from_secs(10), codex.wait())
             .await
             .unwrap()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("CODENEO-GATEWAY-FIXTURE-OK"));
+            .unwrap()
+            .success());
         let usage = crate::usage::codex_usage_fixture(&fixture.path().join("sessions"));
-        let [(model, tokens)] = usage.as_slice() else {
-            panic!("expected exactly one gateway model in the usage report");
-        };
-        assert_eq!(model, "fixture-model");
-        assert_eq!((tokens.input, tokens.cache_read, tokens.output), (3, 2, 5));
+        assert_eq!(usage.iter().map(|(_, tokens)| tokens.input).sum::<u64>(), 9);
+        assert_eq!(
+            usage.iter().map(|(_, tokens)| tokens.cache_read).sum::<u64>(),
+            6
+        );
+        assert_eq!(usage.iter().map(|(_, tokens)| tokens.output).sum::<u64>(), 15);
         tokio::time::timeout(Duration::from_secs(2), provider)
             .await
             .unwrap()
@@ -1811,7 +2126,7 @@ args = ["%s", "fixture-codex-key"]
     async fn switching_preserves_in_flight_streams_and_uses_the_new_supplier_for_the_next_turn() {
         let gate = Arc::new(Notify::new());
         let a = profile("k3", upstream("k3", Some(gate.clone()), |_| {}).await);
-        let b = profile(
+        let mut b = profile(
             "deepseek-flash",
             upstream("deepseek-flash", None, |data| {
                 if data["messages"].as_array().unwrap().len() > 1 {
@@ -1821,6 +2136,14 @@ args = ["%s", "fixture-codex-key"]
             })
             .await,
         );
+        Arc::get_mut(&mut b)
+            .unwrap()
+            .additional_models
+            .push(GatewayModel::new(
+                "k3-alt".into(),
+                Some(("deepseek-flash", "deepseek-flash")),
+                false,
+            ));
         let data = tempfile::tempdir().unwrap();
         let mut service = Service::default();
         let address = service
@@ -1871,7 +2194,9 @@ args = ["%s", "fixture-codex-key"]
         service.select(Some(b.clone()), false);
         let catalog = list_models().await;
         assert_eq!(catalog["data"][0]["display_name"], b.model);
-        assert!(send(new_message("second"))
+        let mut new_with_cached_selection = new_message("second");
+        new_with_cached_selection["model"] = alternate.clone();
+        assert!(send(new_with_cached_selection)
             .await
             .unwrap()
             .text()
@@ -2123,5 +2448,35 @@ args = ["%s", "fixture-codex-key"]
             payload["messages"][3]["content"],
             json!([{"type":"text","text":"DeepSeek replied"}])
         );
+    }
+
+    #[test]
+    fn desktop_switches_models_on_one_account_without_replaying_old_signatures() {
+        let binding = SessionBinding::new("thread".into(), "supplier".into(), Some("a".into()));
+        let original = json!({"messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "signature": "signature-a"},
+                {"type": "text", "text": "previous answer"},
+                {"type": "tool_use", "id": "tool-1", "name": "fixture", "input": {}}
+            ]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "result"}]}
+        ]});
+        let mut replay = original.clone();
+        let switched = binding
+            .prepare_history(&mut replay, "supplier", "b")
+            .unwrap();
+        assert_eq!(
+            replay["messages"][0]["content"],
+            json!([
+                original["messages"][0]["content"][1],
+                original["messages"][0]["content"][2]
+            ])
+        );
+        assert_eq!(replay["messages"][1], original["messages"][1]);
+        let mut restored = original.clone();
+        assert!(switched
+            .prepare_history(&mut restored, "supplier", "a")
+            .is_some());
+        assert_eq!(restored, original);
     }
 }

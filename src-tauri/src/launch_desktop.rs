@@ -222,7 +222,7 @@ pub(super) async fn run(
             .await
             .map_err(|error| format!("模式配置已写入。{error}"))?;
         if hot {
-            return Ok("Claude Desktop 已应用配置。".into());
+            return Ok("Claude Desktop 网关已切换模型。原会话的下一条请求使用新档案。".into());
         }
         if action.is_none() {
             return Ok("Claude Desktop 配置已写入，下次启动时生效。".into());

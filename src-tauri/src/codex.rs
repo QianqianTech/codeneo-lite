@@ -269,6 +269,7 @@ pub(crate) async fn gateway_status(root: &Path) -> Result<(), String> {
 struct Change {
     deltas: Vec<Delta>,
     route: Option<Arc<codex_inference::Route>>,
+    hot: bool,
 }
 
 fn model_catalog(
@@ -352,6 +353,7 @@ fn plan_switch(
         })
     };
     let mut route = None;
+    let mut hot = false;
     let mut deltas = Vec::new();
     let mut retired_catalog = None;
     if let Target::Profile(id, _) = target {
@@ -412,6 +414,7 @@ fn plan_switch(
         if route.is_some() {
             definition["name"] = json!("CodeNeo Lite网关");
             definition["capabilities"] = json!({"remote_compaction": "unsupported"});
+            hot = provider == PROVIDER && existing.as_ref() == Some(&definition);
         }
         let mut catalog = Plan::open(&catalog_path(path))?;
         let owner = catalog.get(None, "managed_by")?;
@@ -531,7 +534,7 @@ fn plan_switch(
             deltas.extend(catalog.finish());
         }
     }
-    Ok(Change { deltas, route })
+    Ok(Change { deltas, route, hot })
 }
 
 pub(crate) async fn switch(root: &Path, target: Target<'_>) -> Result<Outcome, String> {
@@ -559,11 +562,16 @@ pub(crate) async fn switch(root: &Path, target: Target<'_>) -> Result<Outcome, S
     } else {
         None
     };
-    let Change { deltas, route } = plan_switch(root, &path, &store, target, port)?;
+    let Change { deltas, route, hot } = plan_switch(root, &path, &store, target, port)?;
     transaction::commit(root, Client::Codex, deltas, &crate::clients::allowed(root))?;
     service.select_codex(route);
     Ok(Outcome {
-        message: "已保存 Codex 用户配置。重新打开 Codex 或启动新 CLI 进程后使用。".into(),
+        message: if hot {
+            "Codex 网关已切换模型。原会话的下一条请求使用新模型。"
+        } else {
+            "已保存 Codex 用户配置。重新打开 Codex 或启动新 CLI 进程后使用。"
+        }
+        .into(),
     })
 }
 
@@ -587,15 +595,17 @@ mod tests {
         let first = save("fixture-one");
         let second = save("fixture-two");
         let allowed = [path.clone(), models::path(root), catalog_path(&path)];
-        let apply = |target, port| {
+        let apply = |target, port, expected_hot| {
             let (_, store) = models::read(root).unwrap();
-            let Change { deltas, route } = plan_switch(root, &path, &store, target, port).unwrap();
+            let Change { deltas, route, hot } = plan_switch(root, &path, &store, target, port).unwrap();
+            assert_eq!(hot, expected_hot);
             transaction::commit(root, Client::Codex, deltas, &allowed).unwrap();
             route
         };
         let a = apply(
             Target::Profile(&first, Some(Connection::Gateway)),
             Some(gateway::DEFAULT_PORT),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -606,13 +616,22 @@ mod tests {
         assert_ne!(a.key, a.upstream_key);
         let bytes = fs::read_to_string(&path).unwrap();
         assert!(!bytes.contains(&a.key) && !bytes.contains(&a.upstream_key));
-        let alternate = 49321;
         let b = apply(
             Target::Profile(&second, Some(Connection::Gateway)),
-            Some(alternate),
+            Some(gateway::DEFAULT_PORT),
+            true,
         )
         .unwrap();
-        assert_ne!(a.key, b.key);
+        assert_eq!(a.key, b.key);
+        assert_eq!(b.model, "fixture-two");
+        let alternate = 49321;
+        let moved = apply(
+            Target::Profile(&second, Some(Connection::Gateway)),
+            Some(alternate),
+            false,
+        )
+        .unwrap();
+        assert_eq!(b.key, moved.key);
         let (_, store) = models::read(root).unwrap();
         assert_eq!(
             view(&store, &path).unwrap().selected.as_deref(),
@@ -622,7 +641,7 @@ mod tests {
             .unwrap()
             .is_some_and(|(active, port)| active.key == b.key && port == alternate));
 
-        assert!(apply(Target::Official, None).is_none());
+        assert!(apply(Target::Official, None, false).is_none());
         let (_, store) = models::read(root).unwrap();
         let official = view(&store, &path).unwrap();
         assert_eq!(official.state, "official");
@@ -641,8 +660,8 @@ mod tests {
         assert!(applied_gateway(root, &path, &store)
             .unwrap()
             .is_some_and(|(active, port)| active.key == b.key && port == alternate));
-        assert!(apply(Target::Official, None).is_none());
-        assert!(apply(Target::Restore, None).is_none());
+        assert!(apply(Target::Official, None, false).is_none());
+        assert!(apply(Target::Restore, None, false).is_none());
         let config = Plan::open(&path).unwrap();
         assert_eq!(
             config.get(None, "model").unwrap(),

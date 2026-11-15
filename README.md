@@ -25,7 +25,7 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 在「客户端」选择应用，再点卡片上的启动按钮。托盘菜单也可以快速打开客户端。
 
-- **Claude Desktop** 使用 ClaudeKeeper 的本机应用启动方式。模式或模型列表需要重载时，点击「应用并重启」，让当前窗口退出后读取新配置。
+- **Claude Desktop** 使用 ClaudeKeeper 的本机应用启动方式。首次接入网关或切换连接方式时，点击「应用并重启」。已接入网关时可用「应用模式」热切模型。
 - **Claude Code** 在系统终端启动。若有模型正在等待切换，退出旧会话，等配置应用后再打开新会话。
 - **Codex** 和 **Codex CLI** 有各自的启动入口，共用 Codex 用户配置。使用自定义 `CODEX_HOME` 时，CLI 读取对应目录下的配置。
 - **WorkBuddy** 可以打开检测到的本机应用。添加模型后，在 WorkBuddy 的对话中选择它。
@@ -44,9 +44,9 @@ Codex 和适合直连的 Claude Desktop 档案可以选择「直连兼容接口�
 
 | 客户端 | 模型接口 | 配置生效 | MCP 连接方式 |
 | --- | --- | --- | --- |
-| Claude Desktop | Anthropic Messages | 完全退出并重开 Claude Desktop | 本地命令、FrameLeap 快捷接入 |
+| Claude Desktop | Anthropic Messages | 网关内热切，初次接入或更改连接方式时重开 | 本地命令、FrameLeap 快捷接入 |
 | Claude Code | Anthropic Messages | 现有会话退出后自动应用，重新运行 `claude` 后用 `/model` 查看 | Streamable HTTP、SSE、本地命令 |
-| Codex 桌面端与 CLI | OpenAI Responses | 重开应用或运行 `codex`，从原生模型列表选择 | Streamable HTTP、本地命令 |
+| Codex 桌面端与 CLI | OpenAI Responses | 网关内热切，直连需重开后从原生列表选择 | Streamable HTTP、本地命令 |
 | WorkBuddy | Chat Completions | 在 WorkBuddy 的对话模型菜单中选择已添加的模型 | Streamable HTTP、SSE、本地命令 |
 | OpenCode 1.17.18–1.x | Chat Completions、Responses、Anthropic Messages | 运行 `opencode`，使用 `/models` | Streamable HTTP、本地命令 |
 | Qwen Code 0.27.3–0.x | Chat Completions、Responses | 运行 `qwen`，使用 `/model` | Streamable HTTP、SSE、本地命令 |
@@ -58,12 +58,31 @@ Codex 和适合直连的 Claude Desktop 档案可以选择「直连兼容接口�
 
 ### 一个档案使用多个模型
 
-- **Claude Desktop** 在客户端页点击「配置可选模型」，从服务商目录勾选模型，或在「手动添加模型 ID」里每行输入一个 ID。在已选列表中可移除模型或点击「设为默认」，一次保存到当前档案。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。应用后重新打开 Claude Desktop，在模型菜单中选择。应用新供应商档案后，可回原会话继续，历史消息会随请求发给当前供应商。旧会话若提示接续授权，可刷新 Lite 中的 Desktop 状态后，点击「恢复与撤销 → 接续旧会话」。
+- **Claude Desktop** 在客户端页点击「配置可选模型」，从服务商目录勾选模型，或在「手动添加模型 ID」里每行输入一个 ID。在已选列表中可移除模型或点击「设为默认」，一次保存到当前档案。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。重开 Claude Desktop 可以刷新它的模型菜单。旧会话若提示接续授权，可刷新 Lite 中的 Desktop 状态后，点击「恢复与撤销 → 接续旧会话」。
 - **Claude Code** 在档案中展开「Claude Code 模型映射」。可分别配置 Opus、Sonnet、Haiku、Fable、快速模型、子 Agent 和推理模型。未填写的角色沿用档案的默认模型。
-- **Codex** 直连档案会将同一账号下已保存的模型写入原生目录，所选档案作为默认模型。Codex 每次启动使用当前配置的一个服务商。Lite 网关使用当前档案对应的模型。
+- **Codex** 直连档案会将同一账号下已保存的模型写入原生目录，所选档案作为默认模型。网关模式下，在 Lite 中选择和查看实际转发的模型。
 - **新增 CLI** 在客户端页勾选已保存的模型并指定默认项，再点击「应用模型列表」。Kimi Code CLI 可以填写模型上下文上限。Qwen Code 会选用 OpenAI 兼容认证，恢复原配置时还原认证设置。
 
 OpenCode、Qwen Code、CodeBuddy Code、Kimi Code 和 Copilot CLI 通过各自的用户配置读取凭据。这些客户端配置含 API Key。Lite 的模型档案库与配置备份使用加密存储。
+
+### 在网关中热切模型
+
+Claude Desktop、Codex 桌面端和 Codex CLI 已接入 Lite 网关后，在 Lite 的客户端页选任意兼容模型档案，保持连接方式为「CodeNeo Lite网关」，再点「应用模式」。原会话的下一条请求会将续聊上下文发给所选档案的供应商。已开始的流式请求由原模型完成。客户端内已加载的模型名称可能需要重开才会刷新。Codex 的用量统计读取客户端日志，热切前已打开的会话可能继续按原模型名归类。
+
+### Claude Desktop 的思考强度
+
+用新版 Lite 重新应用 Claude Desktop 档案，再重开 Claude Desktop。选择模型后，在输入框旁的模型菜单中点 **Effort**。Lite 按每个模型及其实际使用的 Anthropic Messages 接口判断可用档位。网关优先读取模型目录声明的档位；目录未提供档位时，使用以下已经核对的规则。只有思考开关、固定强度、自动路由或未确认有可调档位的模型不添加 Effort。
+
+| 接入接口与模型 | 可区分的档位 | Claude Desktop 菜单中的对应关系 |
+| --- | --- | --- |
+| [百炼 Token Plan Qwen4 Max Preview](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)、[百炼 Qwen3.8 Max / Flash](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | Low、Medium、Extra | High 和 Extra 都进入 `xhigh`；最高档为 Extra |
+| [百炼 GLM-5.3](https://help.aliyun.com/zh/model-studio/anthropic-api-messages)、[智谱 GLM-5.3 / Flash](https://docs.bigmodel.cn/cn/coding-plan/latest-model)、[Kimi Code K3.1 Pro / K3 / K2.8 Preview](https://www.kimi.com/code/docs/third-party-tools/claude-code.html)、[DeepSeek 官方 Flash / V4 Pro](https://api-docs.deepseek.com/guides/thinking_mode/) | Low、High、Max | Medium 归到 High |
+| [百炼 GLM-5.2、DeepSeek V4 Pro](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | High、Max | Low、Medium 归到 High |
+| [百炼 kimi-k3.1-pro](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | Low、Medium、High、Max | 四档分别转发 |
+| [Claude 模型](https://platform.claude.com/docs/en/build-with-claude/effort) | 按型号 | 使用 Claude Desktop 的模型档位 |
+| [OpenRouter](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#discovering-per-model-reasoning-options)、其他 Anthropic 兼容接口 | 按模型目录声明 | 目录中支持的档位按原值转发；只有一个可用档时不显示选择 |
+
+Claude Desktop 的[配置](https://claude.com/docs/third-party/claude-desktop/configuration#inferencemodels)只能限制最高档。对于目录中档位不连续的模型，Lite 会将菜单里的额外选项转成最接近的可用档位。只调节思考预算的模型不视为有离散档位。
 
 ## 配置 MCP
 
@@ -110,7 +129,7 @@ npx playwright install chromium
 npm run test:ui
 ```
 
-若本机已安装 Codex CLI，可用 `CODENEO_TEST_CODEX="$(command -v codex)" cargo test -p codeneo-lite direct_catalog_shows_same_account_models_and_restores_external_catalog` 核对原生模型目录，也可以将测试名换成 `native_codex_completes_a_turn_through_the_gateway` 并加上 `-- --ignored`，验证本机网关的流式对话。测试使用临时配置和模拟供应商。
+若本机已安装 Codex CLI，可用 `CODENEO_TEST_CODEX="$(command -v codex)" cargo test -p codeneo-lite direct_catalog_shows_same_account_models_and_restores_external_catalog` 核对原生模型目录，也可以将测试名换成 `native_codex_continues_a_thread_after_gateway_switch` 并加上 `-- --ignored`，验证同一会话切换上游后的续聊。测试使用临时配置和模拟供应商。
 
 用 `npm run build` 构建当前平台的安装包。应用沿用原有 Lite 的本机数据目录，可继续读取已保存的档案。若 Codex 或 FrameLeap 的连接引用了旧版可执行文件路径，请在新应用里重新应用对应模型或更新 MCP 连接。
 

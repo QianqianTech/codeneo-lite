@@ -6,6 +6,7 @@ mod clients;
 mod codex;
 mod codex_inference;
 mod desktop;
+mod desktop_effort;
 mod desktop_inference;
 mod desktop_models;
 mod files;
