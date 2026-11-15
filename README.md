@@ -2,12 +2,22 @@
 
 CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等本机 AI 客户端的模型与 MCP 工具。客户端、模型库、MCP 工具和用量在左侧切换。
 
+## 核心特色功能
+
+在「模型库」选择服务商、填写 API Key、验证并应用，即可为两款桌面客户端分别配置第三方模型，也可以随时切回官方模式。
+
+- **Claude Desktop + Kimi Code / 智谱 GLM Coding Plan**　通过内置预设快速接入兼容 Anthropic Messages 的服务，在 Claude Desktop 的模型菜单中切换模型。
+- **Codex Desktop + Kimi Code / 其他兼容服务**　快速接入支持 OpenAI Responses 的服务。使用直连时，可将同一账号下的多个模型加入 Codex 的原生模型菜单。智谱 GLM Coding Plan 的内置预设用于 Claude Desktop；在 Codex 使用时需另行提供兼容 OpenAI Responses 的接口。
+
 ## 下载安装
 
-- **Windows x64**　[下载 `0.1.2` 安装程序（.exe）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_Windows_x64_Setup.exe)，双击按提示安装。
-- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载 `0.1.2` 通用版（.dmg）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_macOS_universal.dmg)，打开后将应用拖到「应用程序」。
+以下为 **0.1.2 MCP 检测修复版（2026 年 11 月 15 日）**。
 
-这是公开预览版。Windows 安装程序未签名，macOS 版已签名，Apple 公证尚未完成。首次打开可能遇到系统提示。 [发布说明与 SHA-256 校验](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.2)
+- **Windows x64**　[下载 EXE 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_Windows_x64_Setup_20261115.exe)，双击后按简体中文向导安装。安装程序未签名，Windows 可能显示系统提示。
+- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载通用 DMG（待公证）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_macOS_universal_20261115_notarization-pending.dmg)，打开后将应用拖到「应用程序」。该版本已通过 Developer ID 签名验证，尚未完成 Apple 公证，首次打开可能被系统拦截。
+- **Ubuntu x64**　[下载 DEB 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/CodeNeo-Lite_0.1.2_Ubuntu_amd64_20261115.deb)，已在 Ubuntu 22.04 验证。可在下载目录运行 `sudo apt install ./CodeNeo-Lite_0.1.2_Ubuntu_amd64_20261115.deb` 安装。
+
+[发布说明](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.2) · [安装包 SHA-256 校验文件](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.2/SHA256SUMS-20261115.txt)
 
 各版本的改动见 [更新日志](CHANGELOG.md)。
 
