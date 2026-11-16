@@ -1,21 +1,23 @@
-MIT License
+CodeNeo Lite 免费非商业使用许可
 
-Copyright (c) 2026 ClaudeKeeper Lite contributors
+适用范围
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+本许可自 CodeNeo Lite 0.1.11 起适用于明确随附本许可的版本，覆盖权利人或其授权的发行方有权按本许可授权的程序、源代码和随附文档。
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+免费使用
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+用户可为学习、研究、个人项目及其他非商业目的免费下载安装和运行软件，也可分享官方下载链接。通过软件提供的功能配置模型、MCP 和本机设置属于正常使用。
+
+商用限制
+
+受本许可覆盖的软件仅限非商业用途。用软件开展企业经营、交付商业项目、提供收费服务或有偿代配置，以及销售或出租软件副本，均属于商业用途。免费提供软件副本但将其作为付费产品或服务的一部分，也属于商业用途。
+
+二次开发限制
+
+未经授权方书面许可，用户不得修改受本许可覆盖的程序或源码、制作或发布其衍生版本，或将其代码纳入其他软件进行二次开发。适用法律明确保留的权利依其规定行使。
+
+原有许可和第三方组件
+
+此前按 MIT 许可证发布的软件、代码和文档继续适用其原许可证及版权声明。项目包含按 MIT 许可使用的组件，MIT 许可证及原版权声明见 LICENSE-MIT。
+
+第三方组件适用各自附带的许可证。第三方客户端、模型 API 和订阅服务适用各提供方的条款。

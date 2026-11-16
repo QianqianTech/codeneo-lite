@@ -2,7 +2,7 @@
   "name": "codeneo-lite",
   "version": "0.1.12",
   "private": true,
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "postinstall": "npm --prefix mcp/playwright install --omit=dev --package-lock=false --ignore-scripts --no-audit --no-fund",
     "dev": "tauri dev",

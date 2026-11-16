@@ -23,6 +23,7 @@
     "targets": "all",
     "resources": {
       "../LICENSE": "licenses/CodeNeo-Lite-LICENSE.txt",
+      "../LICENSE-MIT": "licenses/CodeNeo-Lite-MIT.txt",
       "../mcp/playwright/node_modules/": "mcp/playwright/node_modules/"
     },
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],

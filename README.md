@@ -25,7 +25,7 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 本页提供的 **0.1.9** 和此前按 MIT 发布的版本，继续按发布时的 MIT 许可证授权。[0.1.9 的 MIT 许可证](https://github.com/QianqianTech/codeneo-lite/blob/v0.1.9/LICENSE)
 
-明确采用新许可的后续版本允许免费下载安装和非商业使用，禁止商用和二次开发。具体适用版本和范围以该版本发布时随附的授权为准。[后续版本使用许可](docs/noncommercial-use-license.md)
+**0.1.11** 起，明确随附新许可的版本允许免费下载安装和非商业使用，禁止商用和二次开发。此前按 MIT 发布的代码及沿用 MIT 的组件继续适用原许可。[免费非商业使用许可](LICENSE) · [原 MIT 许可证和版权声明](LICENSE-MIT)
 
 随安装包分发的 Playwright MCP 和 Playwright 采用 Apache-2.0，并附有各自的许可文件及声明。其他第三方组件适用各自的许可证。[Playwright MCP 许可证](https://github.com/microsoft/playwright-mcp/blob/main/LICENSE) · [Playwright 许可证](https://github.com/microsoft/playwright/blob/main/LICENSE)
 

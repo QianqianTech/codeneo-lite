@@ -3,7 +3,7 @@ name = "codeneo-lite"
 version = "0.1.12"
 edition.workspace = true
 rust-version = "1.96"
-license.workspace = true
+license-file = "../LICENSE"
 description = "codeneo-lite"
 
 [build-dependencies]
