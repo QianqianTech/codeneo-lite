@@ -38,6 +38,7 @@ const MAX_CODEX_SSE_LINE: usize = 1024 * 1024;
 const MAX_SESSIONS: usize = 512;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(300);
 const LOG_SOURCE: &str = "desktop-gateway";
+const GLM_IMAGE_ERROR: &str = "百炼 Token Plan 的 glm-5.3 仅支持文本，此会话包含图片。请切换到支持图片的模型（如 qwen3.8-max）继续；如需使用 glm-5.3，请新建纯文本会话。";
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct GatewayModel {
@@ -268,6 +269,23 @@ fn tool_continuation_without_thinking(request: &Value) -> bool {
         })
 }
 
+fn has_message_image(request: &Value) -> bool {
+    // Check replayed messages too. Claude Desktop also sends screenshots in tool results.
+    request["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .any(|block| {
+            block["type"] == "image"
+                || block["type"] == "tool_result"
+                    && block["content"]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|part| part["type"] == "image"))
+        })
+}
+
 struct PendingSession {
     request: u64,
     session: String,
@@ -286,6 +304,7 @@ struct Routing {
 
 enum RouteError {
     UnknownModel,
+    UnsupportedImage,
     Unbound { recoverable: bool },
     Session(&'static str),
 }
@@ -432,6 +451,13 @@ impl Routing {
             })
             .ok_or(RouteError::UnknownModel)?
             .to_owned();
+        if model.eq_ignore_ascii_case("glm-5.3")
+            && crate::models::is_aliyun_token_plan(&route.base)
+            && route.base.path().trim_end_matches('/') == "/apps/anthropic"
+            && has_message_image(request)
+        {
+            return Err(RouteError::UnsupportedImage);
+        }
         let model_fingerprint = route.fingerprint_for_model(&model);
         if let Some(binding) =
             binding.filter(|binding| !binding.awaiting_recovery || binding.supplier == supplier)
@@ -1061,6 +1087,19 @@ impl Gateway {
                     "当前供应商档案中没有此模型，请在 Desktop 选择已配置的模型。",
                 )
             }
+            Err(RouteError::UnsupportedImage) => {
+                log.record(
+                    "warn",
+                    "本机网关",
+                    "DESKTOP_UNSUPPORTED_IMAGE",
+                    "HTTP 400 · 百炼 Token Plan 的 glm-5.3 不支持图片；请求未发送给供应商。",
+                );
+                return non_retryable_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    GLM_IMAGE_ERROR,
+                );
+            }
             Err(RouteError::Unbound { recoverable }) => {
                 let (code, message) = if recoverable {
                     ("DESKTOP_SESSION_UNBOUND", "此旧会话需要接续授权。请在 CodeNeo Lite 刷新 Claude Desktop 状态，然后在「恢复与撤销」中选择「接续旧会话」。")
@@ -1440,6 +1479,56 @@ mod tests {
         ] {
             let mut request = json!({"model":id, "messages":[{"role":"user","content":"fixture"}]});
             assert_eq!(routing.route(&mut request, true, &log).ok().unwrap().model, model);
+        }
+    }
+
+    #[test]
+    fn token_plan_glm_rejects_images_and_keeps_the_same_history_for_qwen() {
+        let token_plan =
+            Url::parse("https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic").unwrap();
+        let mut route = profile("qwen3.8-max", token_plan);
+        let glm = GatewayModel::new("glm-5.3".into(), None, false);
+        Arc::get_mut(&mut route).unwrap().additional_models = vec![glm.clone()];
+        let data = tempfile::tempdir().unwrap();
+        let mut routing = Routing::open(&data.path().join("sessions.json"));
+        routing.active = Some(route);
+        let log = RequestLog::new(&Method::POST, "/v1/messages");
+        let image = json!({"type": "image", "source": {"type": "url", "url": "https://fixture.example/screenshot.png"}});
+        let mut request = json!({
+            "model": glm.id,
+            "metadata": {"user_id": "{\"session_id\":\"fixture\"}"},
+            "messages": [{"role": "user", "content": [image]}],
+        });
+        assert!(matches!(
+            routing.route(&mut request, true, &log),
+            Err(RouteError::UnsupportedImage)
+        ));
+        assert!(routing.sessions.is_empty());
+
+        request["messages"] = json!([{"role": "user", "content": "Describe an image in words."}]);
+        assert_eq!(routing.route(&mut request, true, &log).ok().unwrap().model, "glm-5.3");
+        for history in [
+            json!([
+                {"role": "user", "content": [image]},
+                {"role": "assistant", "content": "I see the screenshot."},
+                {"role": "user", "content": "Continue with the same screenshot."},
+            ]),
+            json!([
+                {"role": "user", "content": "Take a screenshot."},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fixture", "name": "screenshot", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_fixture", "content": [image]}]},
+            ]),
+        ] {
+            request["model"] = json!(glm.id);
+            request["messages"] = history.clone();
+            assert!(matches!(
+                routing.route(&mut request, true, &log),
+                Err(RouteError::UnsupportedImage)
+            ));
+            request["model"] = json!(MODEL);
+            let routed = routing.route(&mut request, true, &log).ok().unwrap();
+            assert_eq!(routed.model, "qwen3.8-max");
+            assert_eq!(request["messages"], history);
         }
     }
 

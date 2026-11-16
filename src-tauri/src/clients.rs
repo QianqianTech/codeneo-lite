@@ -590,22 +590,20 @@ fn selection(store: &Store, client: Client, id: Option<&str>) -> Result<Option<A
 
 fn desktop_connection(
     store: &Store,
+    paths: &DesktopFiles,
     model: &models::Model,
     connection: Option<Connection>,
-) -> Connection {
-    connection.unwrap_or_else(|| {
-        if !model.desktop_models.is_empty()
-            || !desktop_models::supports_direct(model)
-            || store
-                .desktop
-                .as_ref()
-                .is_some_and(|applied| applied.gateway.is_some())
-        {
-            Connection::Gateway
-        } else {
-            Connection::Direct
+) -> Result<Connection, String> {
+    if let Some(connection) = connection {
+        return Ok(connection);
+    }
+    if desktop_models::supports_direct(model) {
+        let status = desktop_view(store, paths)?;
+        if !status.local_gateway && status.selected.as_deref() == Some(model.id.as_str()) {
+            return Ok(Connection::Direct);
         }
-    })
+    }
+    Ok(Connection::Gateway)
 }
 
 fn plan_desktop(
@@ -935,7 +933,7 @@ impl DesktopChange {
                         .into(),
                 );
             }
-            if desktop_connection(&store, model, connection) == Connection::Gateway {
+            if desktop_connection(&store, &locations, model, connection)? == Connection::Gateway {
                 Some(gateway::prepare(&mut *gateway::SERVICE.lock().await, root, previous).await?)
             } else {
                 None
@@ -1467,8 +1465,8 @@ mod tests {
             native: fixture.path().join("Claude"),
             gateway: fixture.path().join("Claude-3p"),
         });
-        let first = save_model(&root, "fixture-model", None);
-        let second = save_model(&root, "fixture-model", None);
+        let first = save_model(&root, "claude-fixture-model", None);
+        let second = save_model(&root, "claude-fixture-model", None);
         let third = save_model(&root, "other-model", None);
         let state = models::path(&root);
         let allowed = [paths.paths().to_vec(), vec![state.clone()]].concat();
@@ -1480,7 +1478,8 @@ mod tests {
                 .and_then(|applied| applied.gateway.as_ref())
                 .map(desktop_models::Selection::port);
             let port = id.and_then(|id| {
-                (desktop_connection(&store, store.model(id).unwrap().0, connection)
+                let (model, _) = store.model(id).unwrap();
+                (desktop_connection(&store, &paths, model, connection).unwrap()
                     == Connection::Gateway)
                     .then_some(port)
             });
@@ -1495,11 +1494,7 @@ mod tests {
             reload
         };
         let default = gateway::DEFAULT_PORT;
-        assert!(apply(
-            Some(first.as_str()),
-            Some(Connection::Gateway),
-            default
-        ));
+        assert!(apply(Some(&first), None, default));
         let mut config = read(&paths.owned);
         assert_eq!(
             config["inferenceGatewayBaseUrl"],
@@ -1507,7 +1502,7 @@ mod tests {
         );
         assert_eq!(
             config["inferenceModels"][0]["labelOverride"],
-            "fixture-model"
+            "claude-fixture-model"
         );
         config["inferenceGatewayApiKey"] = json!("__sealed__:v1:fixture-token");
         fs::write(&paths.owned, transaction::json_bytes(&config).unwrap()).unwrap();
@@ -1538,7 +1533,7 @@ mod tests {
         assert!(desktop_view(&store, &paths).unwrap().local_gateway);
         assert_eq!(
             desktop_models::labels_for_test(&root, &paths, &store).unwrap(),
-            ["fixture-model"]
+            ["claude-fixture-model"]
         );
         let shifted = read(&paths.owned);
         assert_eq!(
@@ -1560,8 +1555,9 @@ mod tests {
         );
         assert_eq!(
             read(&paths.owned)["inferenceModels"][0]["name"],
-            "fixture-model"
+            "claude-fixture-model"
         );
+        assert!(!apply(Some(&first), None, default));
         let undo = transaction::prepare_undo(&root, Client::Desktop, &allowed).unwrap();
         assert_eq!(
             undo.iter()

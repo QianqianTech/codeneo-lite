@@ -371,6 +371,7 @@ async function main() {
 
     await page.getByRole('heading', { name: 'Claude Desktop', exact: true }).waitFor();
     await gatewayIndicator(false).waitFor();
+    assert.equal(await page.getByRole('combobox', { name: '连接方式', exact: true }).inputValue(), 'gateway');
     assert.equal(await page.locator('#current-model').innerText(), 'qwen3.8-max');
     await page.getByRole('button', { name: '打开 Claude Desktop', exact: true }).click();
     await page.getByText('已请求启动 Claude Desktop。', { exact: true }).waitFor();

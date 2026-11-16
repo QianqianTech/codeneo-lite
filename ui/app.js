@@ -276,7 +276,7 @@ const lite = (() => {
     const third = !supportsMode || (draft?.mode ?? (thirdPartyActive ? "third_party" : "official")) === "third_party";
     const gatewayRequired = id === "desktop" && profile?.desktop_direct === false;
     const defaultsToGateway = status.local_gateway
-      || (id === "desktop" && profile?.id !== status.selected && profile?.desktop_models?.length);
+      || (id === "desktop" && (!profile || profile.id !== status.selected));
     const route = gatewayRequired ? "gateway" : draft?.connection ?? (defaultsToGateway ? "gateway" : "direct");
     $("model-switch").hidden = target.agent || (!supportsMode && !available.length);
     $("client-mode-field").hidden = !supportsMode;

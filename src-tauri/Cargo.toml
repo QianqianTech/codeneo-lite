@@ -1,9 +1,9 @@
 [package]
 name = "codeneo-lite"
-version = "0.1.9"
+version = "0.1.11"
 edition.workspace = true
 rust-version = "1.96"
-license.workspace = true
+license-file = "../LICENSE"
 description = "codeneo-lite"
 
 [build-dependencies]

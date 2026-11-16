@@ -25,7 +25,7 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 本页提供的 **0.1.9** 和此前按 MIT 发布的版本，继续按发布时的 MIT 许可证授权。[0.1.9 的 MIT 许可证](https://github.com/QianqianTech/codeneo-lite/blob/v0.1.9/LICENSE)
 
-明确采用新许可的后续版本允许免费下载安装和非商业使用，禁止商用和二次开发。具体适用版本和范围以该版本发布时随附的授权为准。[后续版本使用许可](docs/noncommercial-use-license.md)
+**0.1.11** 起，明确随附新许可的版本允许免费下载安装和非商业使用，禁止商用和二次开发。此前按 MIT 发布的代码及沿用 MIT 的组件继续适用原许可。[免费非商业使用许可](LICENSE) · [原 MIT 许可证和版权声明](LICENSE-MIT)
 
 随安装包分发的 Playwright MCP 和 Playwright 采用 Apache-2.0，并附有各自的许可文件及声明。其他第三方组件适用各自的许可证。[Playwright MCP 许可证](https://github.com/microsoft/playwright-mcp/blob/main/LICENSE) · [Playwright 许可证](https://github.com/microsoft/playwright/blob/main/LICENSE)
 
@@ -45,7 +45,7 @@ Claude Desktop、Codex 等第三方客户端，以及模型 API、Coding Plan �
 
 在「客户端」选择 Claude Desktop、Claude Code 或 Codex，再找到「模型切换」。可切回官方模式，也可为每个客户端单独选择第三方档案。选中档案后可直接「拉取模型」或「验证供应商」。验证会发送一条简短的模型请求。
 
-Codex 和适合直连的 Claude Desktop 档案可以选择「直连兼容接口」或「CodeNeo Lite网关」。直连由客户端访问服务商，网关由 Lite 在本机转发。使用网关时请保持 Lite 运行。Claude Desktop 使用 Anthropic Messages，Codex 使用 OpenAI Responses。
+Claude Desktop 选择新的第三方档案时默认使用「CodeNeo Lite网关」，兼容的档案也可以手动选择「直连兼容接口」。Codex 同样支持这两种连接方式。直连由客户端访问服务商，网关由 Lite 在本机转发。使用网关时请保持 Lite 运行。Claude Desktop 使用 Anthropic Messages，Codex 使用 OpenAI Responses。
 
 1. 在「模型库」点击「添加模型」，或在「客户端」选择应用后点击「配置新模型」。已接入的服务商也可直接点击「拉取模型」。
 2. 选择服务商，填写一次 API Key。已接入的账号可以直接复用已保存的 Key。
