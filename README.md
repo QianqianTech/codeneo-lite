@@ -11,13 +11,13 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 ## 下载安装
 
-以下为 **0.1.7 预发布版（2026 年 11 月 15 日）**。
+以下为 **0.1.9 预发布版（2026 年 11 月 16 日）**。
 
-- **Windows x64**　[下载 EXE 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.7/CodeNeo-Lite_0.1.7_Windows_x64_Setup.exe)，双击后按简体中文向导安装。安装程序未签名，Windows 可能显示系统提示。
-- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载通用 DMG（待公证）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.7/CodeNeo-Lite_0.1.7_macOS_universal_notarization-pending.dmg)，打开后将应用拖到「应用程序」。已验证 Developer ID 签名和 Apple 安全时间戳，公证待完成，首次打开可能被系统拦截。
-- **Ubuntu x64**　[下载 DEB 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.7/CodeNeo-Lite_0.1.7_Ubuntu_amd64.deb)，已在 Ubuntu 22.04 验证。可在下载目录运行 `sudo apt install ./CodeNeo-Lite_0.1.7_Ubuntu_amd64.deb` 安装。
+- **Windows x64**　[下载 EXE 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/CodeNeo-Lite_0.1.9_Windows_x64_Setup.exe)，双击后按简体中文向导安装。安装程序未签名，Windows 可能显示系统提示。
+- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载通用 DMG（待公证）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/CodeNeo-Lite_0.1.9_macOS_universal_notarization-pending.dmg)，打开后将应用拖到「应用程序」。已验证 Developer ID 签名和 Apple 安全时间戳，公证待完成，首次打开可能被系统拦截。
+- **Ubuntu x64**　[下载 DEB 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/CodeNeo-Lite_0.1.9_Ubuntu_amd64.deb)，已在 Ubuntu 22.04 验证。可在下载目录运行 `sudo apt install ./CodeNeo-Lite_0.1.9_Ubuntu_amd64.deb` 安装。
 
-[发布说明](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.7) · [安装包 SHA-256 校验文件](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.7/SHA256SUMS)
+[发布说明](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.9) · [安装包 SHA-256 校验文件](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/SHA256SUMS)
 
 各版本的改动见 [更新日志](CHANGELOG.md)。
 
