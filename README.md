@@ -11,19 +11,19 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 ## 下载安装
 
-以下为 **0.1.9 预发布版（2026 年 11 月 16 日）**。
+以下为 **0.1.12 预发布版（2026 年 11 月 16 日）**。
 
-- **Windows x64**　[下载 EXE 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/CodeNeo-Lite_0.1.9_Windows_x64_Setup.exe)，双击后按简体中文向导安装。安装程序未签名，Windows 可能显示系统提示。
-- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载通用 DMG（待公证）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/CodeNeo-Lite_0.1.9_macOS_universal_notarization-pending.dmg)，打开后将应用拖到「应用程序」。已验证 Developer ID 签名和 Apple 安全时间戳，公证待完成，首次打开可能被系统拦截。
-- **Ubuntu x64**　[下载 DEB 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/CodeNeo-Lite_0.1.9_Ubuntu_amd64.deb)，已在 Ubuntu 22.04 验证。可在下载目录运行 `sudo apt install ./CodeNeo-Lite_0.1.9_Ubuntu_amd64.deb` 安装。
+- **Windows x64**　[下载 EXE 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.12/CodeNeo-Lite_0.1.12_Windows_x64_Setup.exe)，双击后按简体中文向导安装。安装程序未签名，Windows 可能显示系统提示。
+- **macOS 13 或更新版本**（Apple 芯片和 Intel）　[下载通用 DMG（待公证）](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.12/CodeNeo-Lite_0.1.12_macOS_universal_notarization-pending.dmg)，打开后将应用拖到「应用程序」。已验证 Developer ID 签名和 Apple 安全时间戳，公证待完成，首次打开可能被系统拦截。
+- **Ubuntu x64**　[下载 DEB 安装包](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.12/CodeNeo-Lite_0.1.12_Ubuntu_amd64.deb)，已在 Ubuntu 22.04 验证。可在下载目录运行 `sudo apt install ./CodeNeo-Lite_0.1.12_Ubuntu_amd64.deb` 安装。
 
-[发布说明](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.9) · [安装包 SHA-256 校验文件](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.9/SHA256SUMS)
+[发布说明](https://github.com/QianqianTech/codeneo-lite/releases/tag/v0.1.12) · [安装包 SHA-256 校验文件](https://github.com/QianqianTech/codeneo-lite/releases/download/v0.1.12/SHA256SUMS)
 
 各版本的改动见 [更新日志](CHANGELOG.md)。
 
 ## 软件许可
 
-本页提供的 **0.1.9** 和此前按 MIT 发布的版本，继续按发布时的 MIT 许可证授权。[0.1.9 的 MIT 许可证](https://github.com/QianqianTech/codeneo-lite/blob/v0.1.9/LICENSE)
+**0.1.9** 和此前按 MIT 发布的版本，继续按发布时的 MIT 许可证授权。[0.1.9 的 MIT 许可证](https://github.com/QianqianTech/codeneo-lite/blob/v0.1.9/LICENSE)
 
 **0.1.11** 起，明确随附新许可的版本允许免费下载安装和非商业使用，禁止商用和二次开发。此前按 MIT 发布的代码及沿用 MIT 的组件继续适用原许可。[免费非商业使用许可](LICENSE) · [原 MIT 许可证和版权声明](LICENSE-MIT)
 
