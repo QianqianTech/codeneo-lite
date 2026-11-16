@@ -21,6 +21,14 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 
 各版本的改动见 [更新日志](CHANGELOG.md)。
 
+## 软件许可
+
+CodeNeo Lite 的项目代码和随附文档采用 **MIT 许可证**。你可以免费使用、商用、修改、再分发或销售软件副本。分发软件副本或其中的实质部分时，须一并保留原版权声明和完整许可证。软件按现状提供，具体条款见 [MIT 许可证全文](LICENSE)。
+
+随安装包分发的 Playwright MCP 和 Playwright 采用 Apache-2.0，并附有各自的许可文件及声明。其他第三方组件适用各自的许可证。[Playwright MCP 许可证](https://github.com/microsoft/playwright-mcp/blob/main/LICENSE) · [Playwright 许可证](https://github.com/microsoft/playwright/blob/main/LICENSE)
+
+Claude Desktop、Codex 等第三方客户端，以及模型 API、Coding Plan 和远程 MCP 服务，适用各提供方的使用条款。账号、API Key、订阅和用量费用由相应提供方管理。项目中提到的第三方产品名称用于说明兼容性。
+
 ## 启动客户端
 
 在「客户端」选择应用，再点卡片上的启动按钮。托盘菜单也可以快速打开客户端。
@@ -118,7 +126,7 @@ Claude Code、Qwen Code、CodeBuddy Code 和 Copilot CLI 的启停入口在原�
 
 FrameLeap 位于「MCP 工具 → 热门 MCP」首位，展开后会选中 Claude Desktop。在臻悦「设置 → 接入 AI 助手」复制工作区 MCP Key，再点击「验证并接入」。
 
-CodeNeo Lite 使用 [MIT 许可证](LICENSE)。欢迎为 [MCP 目录](mcp/catalog.json) 提交自己的服务适配，详见 [贡献指南](CONTRIBUTING.md)。
+欢迎为 MCP 目录提交服务适配。[MCP 目录](mcp/catalog.json) · [贡献指南](CONTRIBUTING.md)
 
 ## 用量与参考费用
 
