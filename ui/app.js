@@ -42,7 +42,9 @@ const lite = (() => {
   let activeClient = "";
   let activeLaunch = "";
   let refreshSequence = 0;
-  let checkingGateway = false;
+  let gatewaySequence = 0;
+  let gatewayState = null;
+  let changingGateway = false;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -325,7 +327,9 @@ const lite = (() => {
       control.disabled = locked || !profile;
     }
     const note = $("client-mode-note");
-    const guidance = local
+    const guidance = local && gatewayState?.paused
+      ? "网关已暂停。恢复网关后，此档案可用于新的请求。"
+      : local
       ? (hotSwitch
         ? "点击「应用模式」后，原会话的下一条请求会使用所选档案，并将续聊上下文发给该供应商。请保持 Lite 运行。"
         : "首次接入网关后请重新打开客户端，并保持 Lite 运行。")
@@ -383,7 +387,8 @@ const lite = (() => {
     applied.replaceChildren(...entries.map(id => element("code", "", id)));
     const gatewayStatus = $("gateway-status");
     gatewayStatus.hidden = !status.local_gateway;
-    gatewayStatus.textContent = status.gateway_verified ? "CodeNeo Lite网关 · 已完成转发"
+    gatewayStatus.textContent = gatewayState?.paused ? "CodeNeo Lite网关 · 已暂停"
+      : status.gateway_verified ? "CodeNeo Lite网关 · 已完成转发"
       : status.gateway_ready ? "CodeNeo Lite网关 · 已就绪" : "CodeNeo Lite网关";
     const supported = target.protocols || [target.protocol];
     $("client-protocol").textContent = supported.length
@@ -503,16 +508,17 @@ const lite = (() => {
     const { id } = target;
     const codeEffort = id === "code" && action === "terminal" ? $("code-effort").value : "";
     const args = { client: id, action };
-    if (action === "terminal" && (id === "code" || id === "codex")) {
-      const cwd = await pickTerminalDirectory(target);
-      if (!cwd) return;
-      args.cwd = cwd;
-    }
     if (codeEffort) args.codeEffort = codeEffort;
     running.add(id);
-    launchMessages.set(id, { kind: "pending", text: action === "restart" ? "正在重启客户端…" : "正在打开客户端…" });
-    renderClients();
     try {
+      if (action === "terminal" && (id === "code" || id === "codex")) {
+        renderClients();
+        const cwd = await invoke("pick_terminal_directory");
+        if (!cwd) return;
+        args.cwd = cwd;
+      }
+      launchMessages.set(id, { kind: "pending", text: action === "restart" ? "正在重启客户端…" : "正在打开客户端…" });
+      renderClients();
       const result = await invoke("launch_client", args);
       launchMessages.set(id, { kind: "success", text: result });
       const configured = clientMessages.get(id);
@@ -526,26 +532,43 @@ const lite = (() => {
     }
   }
 
-  async function pickTerminalDirectory(target) {
-    try {
-      return await invoke("pick_terminal_directory");
-    } catch (error) {
-      launchMessages.set(target.id, { kind: "error", text: errorText(error) });
-      renderClients();
-      return null;
-    }
+  function renderGatewayControl() {
+    const { paused = false, ready = false } = gatewayState || {};
+    const indicator = $("gateway-indicator");
+    const label = paused ? "网关已暂停" : ready ? "网关正常" : "网关未就绪";
+    indicator.dataset.ready = String(ready);
+    indicator.dataset.paused = String(paused);
+    indicator.title = label;
+    indicator.setAttribute("aria-label", label);
+    $("gateway-action-label").textContent = paused ? "恢复网关" : "暂停网关";
+    $("toggle-gateway").disabled = !gatewayState || changingGateway;
   }
 
   async function refreshGateway() {
-    if (!invoke || checkingGateway) return;
-    checkingGateway = true;
-    const ready = await invoke("lite_gateway_ready").catch(() => false);
-    checkingGateway = false;
-    const indicator = $("gateway-indicator");
-    const label = ready ? "网关正常" : "网关未就绪";
-    indicator.dataset.ready = String(ready);
-    indicator.title = label;
-    indicator.setAttribute("aria-label", label);
+    if (!invoke) return;
+    const index = ++gatewaySequence;
+    const state = await invoke("lite_gateway_status").catch(() => null);
+    if (!state || index !== gatewaySequence) return;
+    const pauseChanged = state.paused !== gatewayState?.paused;
+    gatewayState = state;
+    renderGatewayControl();
+    if (pauseChanged) renderClients();
+  }
+
+  async function toggleGateway() {
+    if (!invoke || !gatewayState || changingGateway) return;
+    changingGateway = true;
+    renderGatewayControl();
+    message($("gateway-feedback"), "");
+    try {
+      await invoke("lite_set_gateway_paused", { paused: !gatewayState.paused });
+    } catch (error) {
+      message($("gateway-feedback"), "error", errorText(error));
+    } finally {
+      await refreshGateway();
+      changingGateway = false;
+      renderGatewayControl();
+    }
   }
 
   async function refresh() {
@@ -576,9 +599,15 @@ const lite = (() => {
     const reopen = command === "switch_model_mode" && !!args.action;
     const hotSwitch = command === "switch_model_mode" && args.connection === "gateway" && client(id).status.local_gateway;
     const pending = reopen ? (args.action === "restart" ? "正在应用配置并重启客户端…" : "正在应用模式并启动客户端…") : "正在写入本机配置…";
-    clientMessages.set(id, { kind: "pending", text: pending });
-    renderClients();
     try {
+      if (command === "switch_model_mode" && id === "codex" && args.action === "terminal") {
+        renderClients();
+        const cwd = await invoke("pick_terminal_directory");
+        if (!cwd) return false;
+        args = { ...args, cwd };
+      }
+      clientMessages.set(id, { kind: "pending", text: pending });
+      renderClients();
       const result = await invoke(command, { client: id, ...args });
       selection.delete(id);
       switchDrafts.delete(id);
@@ -613,13 +642,7 @@ const lite = (() => {
     if (action === "restart" && !(await confirmRestart(target.name))) return;
     const args = modes ? { id, connection, action } : { id };
     if (target.id === "codex") args.surface = activeLaunch === "terminal" ? "cli" : "desktop";
-    if (action === "terminal" && target.id === "codex") {
-      const cwd = await pickTerminalDirectory(target);
-      if (!cwd) return;
-      args.cwd = cwd;
-    }
-    void clientAction(target.id, modes ? "switch_model_mode" : "apply_model",
-      args);
+    void clientAction(target.id, modes ? "switch_model_mode" : "apply_model", args);
   }
 
   async function inspectSavedModel(check) {
@@ -697,6 +720,7 @@ const lite = (() => {
     }
   });
   $("refresh-clients").addEventListener("click", refresh);
+  $("toggle-gateway").addEventListener("click", toggleGateway);
   $("client-add-model").addEventListener("click", event => publish("new-model", { target: activeClient, opener: event.currentTarget }));
   $("edit-client-model").addEventListener("click", event => {
     const model = api.data.models.find(model => model.id === $("client-model-picker").value);
@@ -748,7 +772,7 @@ const lite = (() => {
   });
   if (tauri?.event?.listen) {
     void tauri.event.listen("lite-page", ({ payload }) => {
-      if (["models", "tools", "usage"].includes(payload)) show(payload);
+      if (["clients", "models", "tools", "usage"].includes(payload)) show(payload);
       else if (payload === "codex-cli") showClient("codex", "terminal");
       else showClient(payload);
     }).catch(() => {});
@@ -763,6 +787,13 @@ const lite = (() => {
     void tauri.event.listen("lite-launch", ({ payload }) => {
       launchMessages.set(payload.client, { kind: payload.error ? "error" : "success", text: payload.message });
       void refresh();
+    }).catch(() => {});
+    void tauri.event.listen("lite-gateway-changed", () => {
+      message($("gateway-feedback"), "");
+      void refreshGateway();
+    }).catch(() => {});
+    void tauri.event.listen("lite-gateway-error", ({ payload }) => {
+      message($("gateway-feedback"), "error", errorText(payload));
     }).catch(() => {});
   }
   window.addEventListener("focus", () => { if (invoke) void refresh(); });

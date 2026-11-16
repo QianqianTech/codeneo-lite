@@ -22,7 +22,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -38,6 +38,8 @@ const MAX_CODEX_SSE_LINE: usize = 1024 * 1024;
 const MAX_SESSIONS: usize = 512;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(300);
 const LOG_SOURCE: &str = "desktop-gateway";
+const PAUSE_SETTING: &str = "gateway-paused";
+const GLM_IMAGE_ERROR: &str = "百炼 Token Plan 的 glm-5.3 仅支持文本，此会话包含图片。请切换到支持图片的模型（如 qwen3.8-max）继续；如需使用 glm-5.3，请新建纯文本会话。";
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct GatewayModel {
@@ -268,6 +270,23 @@ fn tool_continuation_without_thinking(request: &Value) -> bool {
         })
 }
 
+fn has_message_image(request: &Value) -> bool {
+    // Check replayed messages too. Claude Desktop also sends screenshots in tool results.
+    request["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .any(|block| {
+            block["type"] == "image"
+                || block["type"] == "tool_result"
+                    && block["content"]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|part| part["type"] == "image"))
+        })
+}
+
 struct PendingSession {
     request: u64,
     session: String,
@@ -286,6 +305,7 @@ struct Routing {
 
 enum RouteError {
     UnknownModel,
+    UnsupportedImage,
     Unbound { recoverable: bool },
     Session(&'static str),
 }
@@ -432,6 +452,13 @@ impl Routing {
             })
             .ok_or(RouteError::UnknownModel)?
             .to_owned();
+        if model.eq_ignore_ascii_case("glm-5.3")
+            && crate::models::is_aliyun_token_plan(&route.base)
+            && route.base.path().trim_end_matches('/') == "/apps/anthropic"
+            && has_message_image(request)
+        {
+            return Err(RouteError::UnsupportedImage);
+        }
         let model_fingerprint = route.fingerprint_for_model(&model);
         if let Some(binding) =
             binding.filter(|binding| !binding.awaiting_recovery || binding.supplier == supplier)
@@ -505,6 +532,7 @@ impl Routing {
 #[derive(Default)]
 pub(crate) struct Service {
     listener: Option<Listener>,
+    paused: Arc<AtomicBool>,
 }
 
 struct Listener {
@@ -529,9 +557,47 @@ impl Drop for Listener {
 }
 
 impl Service {
-    #[allow(dead_code)]
-    pub(crate) const fn new() -> Self {
-        Self { listener: None }
+    pub(crate) fn new(paused: Arc<AtomicBool>) -> Self {
+        Self {
+            listener: None,
+            paused,
+        }
+    }
+
+    pub(crate) fn saved_pause(root: &Path) -> Result<bool, String> {
+        match files::read(&root.join(PAUSE_SETTING))?.as_deref() {
+            Some(b"true") => Ok(true),
+            None | Some(b"false") => Ok(false),
+            _ => Err("CodeNeo Lite 的网关暂停设置无效。".into()),
+        }
+    }
+
+    fn lock(root: &Path) -> Result<File, String> {
+        files::private_dir(root)?;
+        files::try_lock(&root.join("gateway.lock"))?.ok_or_else(|| {
+            "已有 CodeNeo Lite 实例正在使用此资料目录的网关，请在原窗口操作。".into()
+        })
+    }
+
+    pub(crate) fn set_paused(&mut self, root: &Path, paused: bool) -> Result<(), String> {
+        // A bound listener already holds this lock for the lifetime of the service.
+        let _lock = if self.listener.is_none() {
+            Some(Self::lock(root)?)
+        } else {
+            None
+        };
+        let path = root.join(PAUSE_SETTING);
+        let previous = files::read(&path)?;
+        let value: &[u8] = if paused { b"true" } else { b"false" };
+        if previous.as_deref() != Some(value) {
+            files::replace(&path, previous.as_deref(), value)?;
+        }
+        self.paused.store(paused, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 
     fn live_listener(&self) -> Option<&Listener> {
@@ -545,6 +611,9 @@ impl Service {
     }
 
     pub(crate) fn is_ready(&self) -> bool {
+        if self.is_paused() {
+            return false;
+        }
         self.live_listener().is_some_and(|listener| {
             let codex_ready = listener
                 .codex_route
@@ -571,9 +640,9 @@ impl Service {
         }
         self.listener = None;
         let root = storage.parent().ok_or("无法定位网关资料目录")?;
-        files::private_dir(root)?;
-        let lock = files::try_lock(&root.join("gateway.lock"))?
-            .ok_or("已有 CodeNeo Lite 实例正在使用此资料目录的网关，请在原窗口操作。")?;
+        let lock = Self::lock(root)?;
+        self.paused
+            .store(Self::saved_pause(root)?, Ordering::SeqCst);
         let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, preferred_port);
         let listener = match TcpListener::bind(address).await {
             Err(error) if preferred_port != 0 && error.kind() == ErrorKind::AddrInUse => {
@@ -608,6 +677,7 @@ impl Service {
             codex_route: codex_route.clone(),
             codex_reasoning: Arc::default(),
             requests: Arc::new(Semaphore::new(12)),
+            paused: self.paused.clone(),
         });
         let task = tokio::spawn(async move {
             let connections = Arc::new(Semaphore::new(32));
@@ -751,6 +821,7 @@ struct Gateway {
     codex_route: Arc<Mutex<Option<Arc<codex_inference::Route>>>>,
     codex_reasoning: Arc<Mutex<codex_inference::ReasoningHistory>>,
     requests: Arc<Semaphore>,
+    paused: Arc<AtomicBool>,
 }
 
 type Body = UnsyncBoxBody<Bytes, std::io::Error>;
@@ -837,6 +908,12 @@ impl RequestLog {
 
     fn reject_session(&self, code: &str, reason: &str) -> Response<Body> {
         self.record("warn", "会话路由", code, &format!("HTTP 403 · {reason}"));
+        non_retryable_error(StatusCode::FORBIDDEN, "permission_error", reason)
+    }
+
+    fn reject_paused(&self) -> Response<Body> {
+        let reason = "CodeNeo Lite 网关已暂停。请在主窗口或托盘菜单恢复网关后重试。";
+        self.record("info", "本机网关", "GATEWAY_PAUSED", reason);
         non_retryable_error(StatusCode::FORBIDDEN, "permission_error", reason)
     }
 }
@@ -1025,21 +1102,17 @@ impl Gateway {
                 "CodeNeo Lite网关只提供模型推理接口",
             );
         }
-        let Ok(permit) = self.requests.clone().try_acquire_owned() else {
-            return log.reject(
-                StatusCode::TOO_MANY_REQUESTS,
-                "DESKTOP_GATEWAY_BUSY",
-                "CodeNeo Lite网关请求过多",
-            );
-        };
         log.record(
             "info",
             "本机网关",
             "DESKTOP_GATEWAY_RECEIVED",
             "本机网关收到请求。",
         );
-        let mut payload = match inference_payload(body, &log).await {
-            Ok(payload) => payload,
+        let (mut payload, permit) = match self
+            .accept_inference(body, &log, "DESKTOP_GATEWAY_BUSY")
+            .await
+        {
+            Ok(accepted) => accepted,
             Err(response) => return response,
         };
         let inference = path == "/v1/messages";
@@ -1060,6 +1133,19 @@ impl Gateway {
                     "DESKTOP_GATEWAY_MODEL",
                     "当前供应商档案中没有此模型，请在 Desktop 选择已配置的模型。",
                 )
+            }
+            Err(RouteError::UnsupportedImage) => {
+                log.record(
+                    "warn",
+                    "本机网关",
+                    "DESKTOP_UNSUPPORTED_IMAGE",
+                    "HTTP 400 · 百炼 Token Plan 的 glm-5.3 不支持图片；请求未发送给供应商。",
+                );
+                return non_retryable_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    GLM_IMAGE_ERROR,
+                );
             }
             Err(RouteError::Unbound { recoverable }) => {
                 let (code, message) = if recoverable {
@@ -1151,15 +1237,11 @@ impl Gateway {
                 "Codex 网关凭据无效。请在 Lite 核对连接方式后重新打开 Codex。",
             );
         };
-        let Ok(permit) = self.requests.clone().try_acquire_owned() else {
-            return log.reject(
-                StatusCode::TOO_MANY_REQUESTS,
-                "CODEX_GATEWAY_BUSY",
-                "CodeNeo Lite网关请求过多",
-            );
-        };
-        let mut payload = match inference_payload(body, &log).await {
-            Ok(payload) => payload,
+        let (mut payload, permit) = match self
+            .accept_inference(body, &log, "CODEX_GATEWAY_BUSY")
+            .await
+        {
+            Ok(accepted) => accepted,
             Err(response) => return response,
         };
         if !payload["model"].as_str().is_some_and(|model| {
@@ -1188,6 +1270,29 @@ impl Gateway {
             Some(reasoning),
         )
         .await
+    }
+
+    async fn accept_inference(
+        &self,
+        body: Incoming,
+        log: &RequestLog,
+        busy_code: &str,
+    ) -> Result<(Value, tokio::sync::OwnedSemaphorePermit), Response<Body>> {
+        if self.paused.load(Ordering::SeqCst) {
+            return Err(log.reject_paused());
+        }
+        let permit = self.requests.clone().try_acquire_owned().map_err(|_| {
+            log.reject(
+                StatusCode::TOO_MANY_REQUESTS,
+                busy_code,
+                "CodeNeo Lite网关请求过多",
+            )
+        })?;
+        let payload = inference_payload(body, log).await?;
+        if self.paused.load(Ordering::SeqCst) {
+            return Err(log.reject_paused());
+        }
+        Ok((payload, permit))
     }
 }
 
@@ -1444,6 +1549,56 @@ mod tests {
     }
 
     #[test]
+    fn token_plan_glm_rejects_images_and_keeps_the_same_history_for_qwen() {
+        let token_plan =
+            Url::parse("https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic").unwrap();
+        let mut route = profile("qwen3.8-max", token_plan);
+        let glm = GatewayModel::new("glm-5.3".into(), None, false);
+        Arc::get_mut(&mut route).unwrap().additional_models = vec![glm.clone()];
+        let data = tempfile::tempdir().unwrap();
+        let mut routing = Routing::open(&data.path().join("sessions.json"));
+        routing.active = Some(route);
+        let log = RequestLog::new(&Method::POST, "/v1/messages");
+        let image = json!({"type": "image", "source": {"type": "url", "url": "https://fixture.example/screenshot.png"}});
+        let mut request = json!({
+            "model": glm.id,
+            "metadata": {"user_id": "{\"session_id\":\"fixture\"}"},
+            "messages": [{"role": "user", "content": [image]}],
+        });
+        assert!(matches!(
+            routing.route(&mut request, true, &log),
+            Err(RouteError::UnsupportedImage)
+        ));
+        assert!(routing.sessions.is_empty());
+
+        request["messages"] = json!([{"role": "user", "content": "Describe an image in words."}]);
+        assert_eq!(routing.route(&mut request, true, &log).ok().unwrap().model, "glm-5.3");
+        for history in [
+            json!([
+                {"role": "user", "content": [image]},
+                {"role": "assistant", "content": "I see the screenshot."},
+                {"role": "user", "content": "Continue with the same screenshot."},
+            ]),
+            json!([
+                {"role": "user", "content": "Take a screenshot."},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fixture", "name": "screenshot", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_fixture", "content": [image]}]},
+            ]),
+        ] {
+            request["model"] = json!(glm.id);
+            request["messages"] = history.clone();
+            assert!(matches!(
+                routing.route(&mut request, true, &log),
+                Err(RouteError::UnsupportedImage)
+            ));
+            request["model"] = json!(MODEL);
+            let routed = routing.route(&mut request, true, &log).ok().unwrap();
+            assert_eq!(routed.model, "qwen3.8-max");
+            assert_eq!(request["messages"], history);
+        }
+    }
+
+    #[test]
     fn parses_only_sse_event_names_across_chunks() {
         let mut sse = SseEvents::default();
         sse.observe(b"data: {\"text\":\"event: message_stop\"}\n\nevent: mess");
@@ -1639,7 +1794,7 @@ mod tests {
             vec![EffortLevel::Low, EffortLevel::XHigh],
         );
         let storage = tempfile::tempdir().unwrap();
-        let mut service = Service::new();
+        let mut service = Service::default();
         let address = service
             .bind("fixture-gateway-key", 0, &storage.path().join("sessions.json"))
             .await
@@ -1766,7 +1921,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let mut service = Service::new();
+        let mut service = Service::default();
         let address = service
             .bind("fixture-desktop-key", 0, &data.path().join("sessions.json"))
             .await
@@ -1823,7 +1978,30 @@ mod tests {
         assert_eq!(old.headers()["content-type"], "text/event-stream");
         let first_chunk = old.chunk().await.unwrap().unwrap();
         assert!(String::from_utf8_lossy(&first_chunk).contains("\"delta\":\"OK\""));
+        service.set_paused(data.path(), true).unwrap();
         service.select_codex(Some(second.clone()));
+        assert!(!service.is_ready());
+        assert_eq!(service.port(), Some(address.port()));
+        let desktop_call = |path: &str| {
+            client
+                .post(format!("http://{address}{path}"))
+                .bearer_auth("fixture-desktop-key")
+                .json(&json!({"model": MODEL, "messages": [{"role": "user", "content": "test"}]}))
+        };
+        for request in [
+            call("fixture-local-a", "fixture-model", json!("while paused")),
+            desktop_call("/v1/messages"),
+            desktop_call("/v1/messages/count_tokens"),
+        ] {
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()["x-should-retry"], "false");
+            assert!(response.text().await.unwrap().contains("网关已暂停"));
+        }
+        gate.notify_one();
+        assert!(old.text().await.unwrap().contains("response.completed"));
+        service.set_paused(data.path(), false).unwrap();
+        assert!(service.is_ready());
         assert!(service.is_serving(&desktop));
         assert!(service.is_serving_codex(&second));
         assert_eq!(
@@ -1857,8 +2035,6 @@ mod tests {
             desktop_models.json::<Value>().await.unwrap()["data"][0]["display_name"],
             "fixture-desktop"
         );
-        gate.notify_one();
-        assert!(old.text().await.unwrap().contains("response.completed"));
         for server in [server, server_b] {
             tokio::time::timeout(Duration::from_secs(5), server)
                 .await
@@ -1984,7 +2160,7 @@ mod tests {
                     .unwrap();
             }
         });
-        let mut service = Service::new();
+        let mut service = Service::default();
         let address = service
             .bind(
                 "fixture-desktop-key",

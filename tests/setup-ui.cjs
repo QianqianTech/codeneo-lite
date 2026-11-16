@@ -16,7 +16,7 @@ async function main() {
     await page.addInitScript(() => {
       let count = 0;
       window.__TAURI__ = { core: { invoke: async (command, args) => {
-        if (command === 'lite_gateway_ready') return false;
+        if (command === 'lite_gateway_status') return { ready: false, paused: false };
         if (command === 'lite_overview') return {
           clients: [{ id: 'desktop', name: 'Claude Desktop', protocol: 'anthropic', transports: ['stdio'],
             status: { state: 'third_party', account: '本机网关', model: 'fixture', can_undo: false } }],

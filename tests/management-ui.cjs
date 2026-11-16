@@ -55,6 +55,12 @@ async function main() {
       };
       window.switches = [];
       window.gatewayAvailable = true;
+      window.gatewayPaused = false;
+      const listeners = new Map();
+      window.setGatewayPaused = paused => {
+        window.gatewayPaused = paused;
+        listeners.get('lite-gateway-changed')?.({});
+      };
       const presets = [
         ['deepseek', 'DeepSeek', 'https://api.deepseek.com/anthropic', ['deepseek-flash', 'deepseek-v4-pro'], clients.map(client => client.id)],
         ['kimi', 'Kimi Code', 'https://api.kimi.com/coding', ['k3', 'k3.1-pro', 'k3.1-pro-highspeed', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], ['desktop', 'code']],
@@ -100,10 +106,14 @@ async function main() {
           if (window.pendingOverview) await window.pendingOverview;
           return structuredClone(view);
         }
-        if (command === 'lite_gateway_ready') return window.gatewayAvailable && clients.some(client => client.status.gateway_ready);
+        if (command === 'lite_gateway_status') return {
+          paused: window.gatewayPaused,
+          ready: !window.gatewayPaused && window.gatewayAvailable && clients.some(client => client.status.gateway_ready),
+        };
+        if (command === 'lite_set_gateway_paused') return window.setGatewayPaused(args.paused);
         if (command === 'pick_terminal_directory') {
           window.pickTerminalDirectoryCalls++;
-          return window.terminalDirectoryToPick;
+          return window.pendingTerminalDirectory ?? window.terminalDirectoryToPick;
         }
         if (command === 'open_agent_help') { window.openedAgentHelp = args; return; }
         if (command === 'apply_agent_models') {
@@ -365,6 +375,9 @@ async function main() {
           };
         }
         throw new Error('Unexpected operation ' + command);
+      } }, event: { listen: async (name, listener) => {
+        listeners.set(name, listener);
+        return () => listeners.delete(name);
       } } };
     }, mcpCatalog);
     await page.goto(pathToFileURL(path.join(__dirname, '../ui/index.html')).href);
@@ -517,6 +530,20 @@ async function main() {
     assert.deepEqual(await page.locator('#current-models code').allTextContents(), ['默认 · k3.1-pro', 'k3']);
     assert.equal(await page.locator('#gateway-status').innerText(), 'CodeNeo Lite网关 · 已就绪');
     await gatewayIndicator(true).waitFor();
+    const pauseGateway = page.getByRole('button', { name: '暂停网关', exact: true });
+    const resumeGateway = page.getByRole('button', { name: '恢复网关', exact: true });
+    const pausedIndicator = page.getByRole('img', { name: '网关已暂停', exact: true });
+    await pauseGateway.click();
+    await resumeGateway.waitFor();
+    await pausedIndicator.waitFor();
+    assert.equal(await page.locator('#gateway-status').innerText(), 'CodeNeo Lite网关 · 已暂停');
+    await capture('gateway-paused');
+    await resumeGateway.click();
+    await gatewayIndicator(true).waitFor();
+    await page.evaluate(() => window.setGatewayPaused(true));
+    await resumeGateway.waitFor();
+    await page.evaluate(() => window.setGatewayPaused(false));
+    await pauseGateway.waitFor();
     await page.evaluate(() => { window.gatewayAvailable = false; });
     await gatewayIndicator(false).waitFor({ timeout: 8000 });
     await page.evaluate(() => { window.gatewayAvailable = true; });
@@ -714,7 +741,22 @@ async function main() {
     await page.getByRole('button', { name: '验证供应商', exact: true }).click();
     await page.getByText('模型调用通过，耗时 23 毫秒。', { exact: true }).waitFor();
     await page.getByRole('heading', { name: 'Codex CLI', exact: true }).waitFor();
-    await page.getByRole('button', { name: '应用并启动 Codex CLI', exact: true }).click();
+    const applyAndLaunch = page.getByRole('button', { name: '应用并启动 Codex CLI', exact: true });
+    const switchesBeforePicker = await page.evaluate(() => window.switches.length);
+    await page.evaluate(() => {
+      window.pendingTerminalDirectory = new Promise(resolve => { window.resolveTerminalDirectory = resolve; });
+    });
+    await applyAndLaunch.click();
+    assert.ok(await applyAndLaunch.isDisabled());
+    assert.ok(await page.getByRole('button', { name: '启动 Codex CLI', exact: true }).isDisabled());
+    assert.equal(await page.evaluate(() => window.switches.length), switchesBeforePicker);
+    await page.evaluate(() => {
+      window.resolveTerminalDirectory(null);
+      window.pendingTerminalDirectory = null;
+    });
+    await page.locator('#apply-client-launch:enabled').waitFor();
+    assert.equal(await page.evaluate(() => window.switches.length), switchesBeforePicker);
+    await applyAndLaunch.click();
     await page.getByText('Codex 配置已写入。', { exact: true }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.switches.at(-1)),
       { client: 'codex', id: 'gpt-6.1-sol-profile', connection: 'gateway', action: 'terminal', cwd: '/mock/project', surface: 'cli' });

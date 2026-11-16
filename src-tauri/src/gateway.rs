@@ -1,15 +1,51 @@
 use crate::{
     clients, codex, desktop_inference, desktop_models, files, secrets, transaction::Client, vault,
 };
-use serde::Deserialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock,
+    },
+};
 
 pub(crate) const DEFAULT_PORT: u16 = 15733;
 const CODEX_PATH: &str = "/codex/v1";
 pub(crate) const CODEX_RESPONSES: &str = "/codex/v1/responses";
 
-pub(crate) static SERVICE: tokio::sync::Mutex<desktop_inference::Service> =
-    tokio::sync::Mutex::const_new(desktop_inference::Service::new());
+static PAUSED: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
+pub(crate) static SERVICE: LazyLock<tokio::sync::Mutex<desktop_inference::Service>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(desktop_inference::Service::new(PAUSED.clone())));
+
+#[derive(Serialize)]
+pub(crate) struct Status {
+    paused: bool,
+    ready: bool,
+}
+
+pub(crate) fn initialize_pause(root: &Path) -> Result<(), String> {
+    let paused = desktop_inference::Service::saved_pause(root)?;
+    PAUSED.store(paused, Ordering::SeqCst);
+    Ok(())
+}
+
+pub(crate) fn is_paused() -> bool {
+    PAUSED.load(Ordering::SeqCst)
+}
+
+pub(crate) async fn status() -> Status {
+    let service = SERVICE.lock().await;
+    Status {
+        paused: service.is_paused(),
+        ready: service.is_ready(),
+    }
+}
+
+pub(crate) async fn set_paused(paused: bool) -> Result<(), String> {
+    let root = secrets::root()?;
+    SERVICE.lock().await.set_paused(&root, paused)
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -103,7 +139,7 @@ pub(crate) async fn prepare_existing(
     Ok(())
 }
 
-pub(crate) async fn resume() -> Result<(), String> {
+pub(crate) async fn restore_routes() -> Result<(), String> {
     let root = secrets::root()?;
     let _lock = clients::lock_for_launch(&root, Client::Desktop)?;
     let desktop = desktop_models::sync(&root).await;
@@ -117,13 +153,30 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    async fn persisted_pause_is_loaded_before_binding() {
+        let data = tempfile::tempdir().unwrap();
+        let root = data.path();
+        let mut service = desktop_inference::Service::default();
+        assert!(!desktop_inference::Service::saved_pause(root).unwrap());
+        service.set_paused(root, true).unwrap();
+
+        let mut restarted = desktop_inference::Service::default();
+        prepare(&mut restarted, root, None).await.unwrap();
+        assert!(restarted.is_paused());
+        assert!(service.set_paused(root, false).is_err());
+
+        restarted.set_paused(root, false).unwrap();
+        assert!(!desktop_inference::Service::saved_pause(root).unwrap());
+    }
+
+    #[tokio::test]
     async fn occupied_port_falls_back_and_restarts_on_the_saved_port() {
         let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let preferred = occupied.local_addr().unwrap().port();
         let data = tempfile::tempdir().unwrap();
         let root = data.path();
-        let mut service = desktop_inference::Service::new();
-        let mut duplicate = desktop_inference::Service::new();
+        let mut service = desktop_inference::Service::default();
+        let mut duplicate = desktop_inference::Service::default();
 
         let error = prepare_existing(&mut service, root, Client::Desktop, preferred)
             .await
@@ -155,7 +208,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let mut restarted = desktop_inference::Service::new();
+        let mut restarted = desktop_inference::Service::default();
         assert_eq!(prepare(&mut restarted, root, None).await.unwrap(), port);
     }
 }

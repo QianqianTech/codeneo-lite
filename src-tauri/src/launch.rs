@@ -146,7 +146,7 @@ pub async fn run_with_effort(
             desktop::run(&home, Some(action), None).await
         }
         (Client::Code | Client::Codex, Action::Terminal) => {
-            open_terminal(client, &home, effort, working_dir).await
+            open_terminal(client, &home, effort, project_directory(working_dir)?).await
         }
         (_, Action::Terminal) if agents::is_added(client) => {
             open_agent_terminal(client, &home).await
@@ -161,7 +161,7 @@ pub async fn run_with_effort(
                 app.open().await?;
                 Ok(format!("已请求打开 {}。", client.name()))
             } else if client == Client::Codex {
-                open_terminal(client, &home, None, None).await
+                Err("未找到 Codex 桌面应用。可以从「Codex CLI」选择项目目录并启动。".into())
             } else {
                 Err("未找到可启动的 WorkBuddy，请先安装。".into())
             }
@@ -450,26 +450,34 @@ fn clean_claude_env(command: &mut Command) {
     }
 }
 
-pub(crate) fn working_directory(value: Option<&str>) -> Result<Option<PathBuf>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.trim().is_empty() {
-        return Err("请选择项目目录。".into());
+pub(crate) async fn pick_project_directory(window: &tauri::WebviewWindow) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("选择项目目录")
+        .set_parent(window)
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+pub(crate) fn project_directory(path: Option<&Path>) -> Result<&Path, String> {
+    let path = path.ok_or("请选择项目目录。")?;
+    if !path.is_absolute() {
+        return Err("项目目录必须使用绝对路径。".into());
     }
-    let path = PathBuf::from(value);
-    let metadata = fs::metadata(&path).map_err(|_| "所选项目目录无法访问。")?;
+    let metadata = fs::metadata(path).map_err(|_| "所选项目目录无法访问。")?;
     if !metadata.is_dir() {
         return Err("所选项目位置必须是目录。".into());
     }
-    Ok(Some(path))
+    #[cfg(unix)]
+    quote(path.as_os_str())?;
+    Ok(path)
 }
 
 async fn open_terminal(
     client: Client,
     home: &Path,
     effort: Option<EffortLevel>,
-    working_dir: Option<&Path>,
+    working_dir: &Path,
 ) -> Result<String, String> {
     let binary = find_cli(client, home)
         .ok_or_else(|| format!("未找到 {} 命令，请先安装。", client.name()))?;
@@ -514,7 +522,7 @@ async fn open_agent_terminal(client: Client, home: &Path) -> Result<String, Stri
     agents::ensure_compatible(client)?;
     let root = secrets::root()?;
     let _lock = clients::lock_for_launch(&root, client)?;
-    terminal(client, home, &binary, None, None, None, None).await?;
+    terminal(client, home, &binary, None, None, home, None).await?;
     Ok(format!("已请求在终端启动 {}。", client.name()))
 }
 
@@ -557,21 +565,16 @@ pub(crate) fn agent_path(binary: Option<&Path>, home: &Path) -> Result<std::ffi:
 #[cfg(unix)]
 fn shell_script(
     client: Client,
-    home: &Path,
     binary: &Path,
     config_name: &str,
     config_dir: &Path,
     effort: Option<EffortLevel>,
-    working_dir: Option<&Path>,
+    working_dir: &Path,
     profile: Option<&str>,
 ) -> Result<String, String> {
     let binary = quote(binary.as_os_str())?;
     let config_dir = quote(config_dir.as_os_str())?;
-    let home = quote(home.as_os_str())?;
-    let working_dir = match working_dir {
-        Some(dir) => quote(dir.as_os_str())?,
-        None => home,
-    };
+    let working_dir = quote(working_dir.as_os_str())?;
     let mut script = String::new();
     if client == Client::Code {
         script.push_str(&format!(
@@ -610,14 +613,12 @@ async fn terminal(
     binary: &Path,
     config: Option<(&str, &Path)>,
     effort: Option<EffortLevel>,
-    working_dir: Option<&Path>,
+    working_dir: &Path,
     profile: Option<&str>,
 ) -> Result<(), String> {
     let path = quote(&terminal_path(home, binary)?)?;
     let script = match config {
-        Some((name, dir)) => {
-            shell_script(client, home, binary, name, dir, effort, working_dir, profile)?
-        }
+        Some((name, dir)) => shell_script(client, binary, name, dir, effort, working_dir, profile)?,
         None => agent_script(client, home, binary)?,
     };
     unix_terminal(&path, &script).await
@@ -678,7 +679,7 @@ async fn terminal(
     binary: &Path,
     config: Option<(&str, &Path)>,
     effort: Option<EffortLevel>,
-    working_dir: Option<&Path>,
+    working_dir: &Path,
     profile: Option<&str>,
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -703,7 +704,7 @@ async fn terminal(
     // expansion and AutoRun are disabled, so punctuation in the path stays literal.
     command
         .env("CODENEO_LITE_CLI", binary)
-        .current_dir(working_dir.unwrap_or(home))
+        .current_dir(working_dir)
         .env("PATH", terminal_path(home, binary)?);
     if let Some((name, dir)) = config {
         command.env(name, dir);
@@ -810,7 +811,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("claude's binary $(exit 2)");
         let profile = temp.path().join("Profile with spaces");
-        let project = temp.path().join("project");
+        let project = temp.path().join("项目 with spaces and 'quotes'");
         fs::create_dir(&project).unwrap();
         fs::write(
             &bin,
@@ -820,12 +821,11 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
         let script = shell_script(
             Client::Code,
-            temp.path(),
             &bin,
             "CLAUDE_CONFIG_DIR",
             &profile,
             Some(EffortLevel::Max),
-            Some(&project),
+            &project,
             None,
         )
         .unwrap();
@@ -845,12 +845,13 @@ mod tests {
     #[test]
     fn terminal_working_directory_rejects_invalid_selections() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("file"), "").unwrap();
-        assert_eq!(working_directory(None).unwrap(), None);
-        assert_eq!(working_directory(Some(temp.path().to_str().unwrap())).unwrap(), Some(temp.path().to_path_buf()));
-        assert!(working_directory(Some("")).is_err());
-        assert!(working_directory(Some("   ")).is_err());
-        assert!(working_directory(Some(temp.path().join("missing").to_str().unwrap())).is_err());
-        assert!(working_directory(Some(temp.path().join("file").to_str().unwrap())).is_err());
+        let file = temp.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert_eq!(project_directory(Some(temp.path())).unwrap(), temp.path());
+        assert!(project_directory(None).is_err());
+        assert!(project_directory(Some(Path::new(""))).is_err());
+        assert!(project_directory(Some(Path::new("."))).is_err());
+        assert!(project_directory(Some(&temp.path().join("missing"))).is_err());
+        assert!(project_directory(Some(&file)).is_err());
     }
 }

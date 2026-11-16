@@ -1,4 +1,4 @@
-use crate::{agents, clients, launch, secrets, transaction::Client};
+use crate::{agents, clients, gateway, launch, secrets, transaction::Client};
 use serde_json::{json, Value};
 use tauri::{
     menu::{Menu, MenuItem, Submenu},
@@ -155,6 +155,12 @@ fn items(app: &AppHandle, view: &Value, client: Client) -> tauri::Result<Submenu
 
 fn menu(app: &AppHandle, view: &Value) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
+    let (id, label) = if gateway::is_paused() {
+        ("resume-gateway", "恢复网关")
+    } else {
+        ("pause-gateway", "暂停网关")
+    };
+    menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
     for client in Client::ALL {
         if agents::is_added(client) {
             let Some(home) = dirs::home_dir() else {
@@ -183,15 +189,22 @@ pub fn refresh(app: &AppHandle) {
     if app.tray_by_id(ID).is_none() {
         return;
     }
-    let Ok(view) = secrets::root().and_then(|root| clients::view(&root)) else {
-        return;
-    };
+    let view = secrets::root()
+        .and_then(|root| clients::view(&root))
+        .unwrap_or(Value::Null);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let (Some(tray), Ok(menu)) = (handle.tray_by_id(ID), menu(&handle, &view)) {
             let _ = tray.set_menu(Some(menu));
         }
     });
+}
+
+pub async fn set_gateway_paused(app: &AppHandle, paused: bool) -> Result<(), String> {
+    gateway::set_paused(paused).await?;
+    refresh(app);
+    let _ = app.emit("lite-gateway-changed", ());
+    Ok(())
 }
 
 pub fn changed(app: &AppHandle, client: &str, message: &str, error: bool) {
@@ -212,6 +225,17 @@ pub fn install(app: &App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
             let id = event.id.as_ref();
+            if matches!(id, "pause-gateway" | "resume-gateway") {
+                let paused = id == "pause-gateway";
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = set_gateway_paused(&app, paused).await {
+                        show(&app, "clients");
+                        let _ = app.emit("lite-gateway-error", error);
+                    }
+                });
+                return;
+            }
             if id == "quit-lite" {
                 app.exit(0);
                 return;
@@ -248,27 +272,28 @@ pub fn install(app: &App) -> tauri::Result<()> {
                     };
                     let needs_directory = action == launch::Action::Terminal
                         && matches!(client, Client::Code | Client::Codex);
+                    let page = if client == Client::Codex && action == launch::Action::Terminal {
+                        "codex-cli"
+                    } else {
+                        client.id()
+                    };
                     let working_dir = if needs_directory {
-                        let mut dialog = rfd::AsyncFileDialog::new().set_title("选择项目目录");
-                        if let Some(window) = app.get_webview_window("main") {
-                            dialog = dialog.set_parent(&window);
-                        }
-                        dialog
-                            .pick_folder()
-                            .await
-                            .map(|handle| handle.path().to_path_buf())
+                        let Some(window) = app.get_webview_window("main") else {
+                            return;
+                        };
+                        show(&app, page);
+                        let Some(directory) = launch::pick_project_directory(&window).await else {
+                            return;
+                        };
+                        Some(directory)
                     } else {
                         None
                     };
-                    let result = if needs_directory && working_dir.is_none() {
-                        Err("未选择项目目录，已取消启动。".to_string())
-                    } else {
-                        launch::run(client, action, working_dir.as_deref()).await
-                    };
+                    let result = launch::run(client, action, working_dir.as_deref()).await;
                     let error = result.is_err();
                     let message = result.unwrap_or_else(|message| message);
                     if error {
-                        show(&app, if codex_cli { "codex-cli" } else { client.id() });
+                        show(&app, page);
                     }
                     let _ = app.emit(
                         "lite-launch",

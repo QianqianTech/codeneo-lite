@@ -29,10 +29,7 @@
           <aside class="client-sidebar" aria-labelledby="clients-title">
             <header class="client-sidebar-header">
               <span class="brand">CodeNeo Lite</span>
-              <div class="sidebar-tools">
-                <span class="gateway-indicator" id="gateway-indicator" role="img" data-ready="false" aria-label="网关未就绪" title="网关未就绪"></span>
-                <button type="button" class="icon-button" id="toggle-client-search" title="搜索客户端" aria-label="搜索客户端" aria-expanded="false" aria-controls="client-search-field"><span class="icon icon-search" aria-hidden="true"></span></button>
-              </div>
+              <button type="button" class="icon-button" id="toggle-client-search" title="搜索客户端" aria-label="搜索客户端" aria-expanded="false" aria-controls="client-search-field"><span class="icon icon-search" aria-hidden="true"></span></button>
             </header>
             <label class="search" id="client-search-field" hidden><span class="sr-only">搜索客户端</span><input id="client-search" type="search" placeholder="搜索客户端"></label>
             <h1 id="clients-title" tabindex="-1">客户端</h1>
@@ -44,13 +41,20 @@
                 <h2 class="page-title" id="current-client"></h2>
                 <span class="status" id="client-status"></span>
               </div>
-              <button type="button" class="icon-button" id="refresh-clients" title="刷新状态" aria-label="刷新状态">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-                  <path d="M18 18a8.5 8.5 0 1 1 0-12l2 2M20 3v5h-5"/>
-                </svg>
-              </button>
+              <div class="client-header-actions">
+                <button type="button" class="secondary" id="toggle-gateway" aria-labelledby="gateway-action-label" disabled>
+                  <span class="gateway-indicator" id="gateway-indicator" role="img" data-ready="false" aria-label="网关未就绪" title="网关未就绪"></span>
+                  <span id="gateway-action-label">暂停网关</span>
+                </button>
+                <button type="button" class="icon-button" id="refresh-clients" title="刷新状态" aria-label="刷新状态">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M18 18a8.5 8.5 0 1 1 0-12l2 2M20 3v5h-5"/>
+                  </svg>
+                </button>
+              </div>
             </header>
+            <p class="feedback" id="gateway-feedback" role="status" hidden></p>
             <div id="client-detail" hidden>
               <section aria-labelledby="current-client">
                 <div class="button-row client-launch" id="client-launch" hidden>

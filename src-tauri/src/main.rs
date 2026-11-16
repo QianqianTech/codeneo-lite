@@ -29,6 +29,7 @@ mod workbuddy;
 
 use claudekeeper_net as model_transport;
 
+use std::path::Path;
 use tauri::Manager;
 use transaction::Client;
 
@@ -49,8 +50,13 @@ async fn configure_frameleap(
 }
 
 #[tauri::command]
-async fn lite_gateway_ready() -> bool {
-    gateway::SERVICE.lock().await.is_ready()
+async fn lite_gateway_status() -> gateway::Status {
+    gateway::status().await
+}
+
+#[tauri::command]
+async fn lite_set_gateway_paused(app: tauri::AppHandle, paused: bool) -> Result<(), String> {
+    tray::set_gateway_paused(&app, paused).await
 }
 
 #[tauri::command]
@@ -138,8 +144,8 @@ async fn launch_client(
     code_effort: Option<model_transport::EffortLevel>,
     cwd: Option<String>,
 ) -> Result<String, String> {
-    let working_dir = launch::working_directory(cwd.as_deref())?;
-    launch::run_with_effort(client, action, code_effort, working_dir.as_deref()).await
+    let working_dir = cwd.as_deref().map(Path::new);
+    launch::run_with_effort(client, action, code_effort, working_dir).await
 }
 
 fn codex_surface(surface: Option<&str>, action: Option<launch::Action>) -> codex::Surface {
@@ -169,6 +175,10 @@ async fn switch_model_mode(
             launch::apply_desktop(id.as_deref(), connection, action).await
         }
         (Client::Codex, None | Some(launch::Action::Open | launch::Action::Terminal)) => {
+            let working_dir = cwd.as_deref().map(Path::new);
+            if action == Some(launch::Action::Terminal) {
+                launch::project_directory(working_dir)?;
+            }
             let root = secrets::root()?;
             let target = id.as_deref().map_or(codex::Target::Official, |id| {
                 codex::Target::Profile(id, connection)
@@ -176,8 +186,7 @@ async fn switch_model_mode(
             let surface = codex_surface(surface.as_deref(), action);
             let outcome = codex::switch(&root, target, surface).await?;
             if let Some(action) = action {
-                let working_dir = launch::working_directory(cwd.as_deref())?;
-                match launch::run(client, action, working_dir.as_deref()).await {
+                match launch::run(client, action, working_dir).await {
                     Ok(message) => Ok(format!("Codex 配置已写入。{message}")),
                     Err(error) => Err(format!("Codex 配置已写入。{error}")),
                 }
@@ -402,15 +411,10 @@ async fn pick_mcp_directory(window: tauri::WebviewWindow) -> Result<Option<Strin
 
 #[tauri::command]
 async fn pick_terminal_directory(window: tauri::WebviewWindow) -> Result<Option<String>, String> {
-    let Some(handle) = rfd::AsyncFileDialog::new()
-        .set_title("选择项目目录")
-        .set_parent(&window)
-        .pick_folder()
-        .await
-    else {
+    let Some(path) = launch::pick_project_directory(&window).await else {
         return Ok(None);
     };
-    Ok(Some(handle.path().to_str().ok_or("项目目录路径编码无效")?.into()))
+    Ok(Some(path.to_str().ok_or("项目目录路径编码无效")?.to_owned()))
 }
 
 #[tauri::command]
@@ -594,13 +598,16 @@ fn main() {
         .setup(|app| {
             if let Ok(root) = secrets::root() {
                 if files::private_dir(&root).is_ok() {
-                    claudekeeper_app::diagnostics::initialize(root);
+                    claudekeeper_app::diagnostics::initialize(root.clone());
+                    if let Err(error) = gateway::initialize_pause(&root) {
+                        claudekeeper_app::diagnostics::record("warn", "gateway-startup", &error);
+                    }
                 }
             }
             let _ = tray::install(app);
             start_pending_check(app.handle().clone());
             tauri::async_runtime::spawn(async {
-                if let Err(error) = gateway::resume().await {
+                if let Err(error) = gateway::restore_routes().await {
                     claudekeeper_app::diagnostics::record("warn", "gateway-startup", &error);
                 }
             });
@@ -620,7 +627,8 @@ fn main() {
             undo_mcp,
             frameleap_status,
             configure_frameleap,
-            lite_gateway_ready,
+            lite_gateway_status,
+            lite_set_gateway_paused,
             lite_overview,
             launch_client,
             switch_model_mode,
