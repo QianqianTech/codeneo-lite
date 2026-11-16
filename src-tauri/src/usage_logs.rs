@@ -353,6 +353,11 @@ mod tests {
         let qwen = crate::usage_prices::estimate("qwen3.8-max", usage).unwrap();
         let expected = (1000.0 * 12.0 + 200.0 * 36.0 + 500.0 * 1.5 + 400.0 * 15.0) / 1_000_000.0;
         assert!((qwen.high_cny - expected).abs() < 1e-9);
-        assert!(crate::usage_prices::estimate("qwen4-max-preview", usage).is_none());
+        assert_eq!(
+            crate::usage_prices::estimate("qwen4-max-preview", usage)
+                .unwrap_err()
+                .reason,
+            crate::usage_prices::Reason::PlanOnly
+        );
     }
 }

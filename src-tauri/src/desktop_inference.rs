@@ -1172,6 +1172,7 @@ impl Gateway {
             );
         }
         // Codex can keep the old model ID for the lifetime of its thread.
+        route.prepare_effort(&mut payload);
         payload["model"] = json!(route.model);
         let reasoning = codex_inference::ReasoningScope::new(self.codex_reasoning.clone(), &route);
         reasoning.prepare(&mut payload);
@@ -1693,6 +1694,7 @@ mod tests {
                     assert_eq!(input["model"], "fixture-model");
                     assert_eq!(input["input"], "test prompt");
                     assert_eq!(input["store"], false);
+                    assert_eq!(input["reasoning"], json!({"effort":"max", "summary":"auto"}));
                     let events = stream::unfold((0, gate), |(step, gate)| async move {
                         let bytes = match step {
                             0 => "event: response.output_text.delta\ndata: {\"delta\":\"OK\"}\n\n",
@@ -1740,6 +1742,7 @@ mod tests {
                 let bytes = request.into_body().collect().await.unwrap().to_bytes();
                 let input: Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(input["model"], "other-model");
+                assert_eq!(input["reasoning"], json!({"effort":"high", "summary":"auto"}));
                 assert_eq!(
                     input["input"],
                     json!([
@@ -1772,16 +1775,18 @@ mod tests {
         let desktop = profile("fixture-desktop", endpoint.clone());
         service.select(Some(desktop.clone()), false);
         assert!(service.is_ready());
-        let codex = |endpoint, model: &str, upstream_key: &str| {
+        use crate::model_transport::EffortLevel::{High, Low, Max};
+        let codex = |endpoint, model: &str, upstream_key: &str, levels| {
             Arc::new(codex_inference::Route {
                 endpoint,
                 model: model.into(),
                 key: "fixture-local-a".into(),
                 upstream_key: upstream_key.into(),
+                effort: Some(crate::model_effort::Options { levels, default: Some(High) }),
             })
         };
-        let first = codex(endpoint, "fixture-model", "fixture-provider-a");
-        let second = codex(endpoint_b, "other-model", "fixture-provider-b");
+        let first = codex(endpoint, "fixture-model", "fixture-provider-a", vec![High, Max]);
+        let second = codex(endpoint_b, "other-model", "fixture-provider-b", vec![Low, High]);
         service.select_codex(Some(first));
         let client = Client::builder()
             .no_proxy()
@@ -1792,7 +1797,8 @@ mod tests {
             client
                 .post(format!("http://{address}{}", gateway::CODEX_RESPONSES))
                 .bearer_auth(key)
-                .json(&json!({"model": model, "input": input, "store": false, "stream": true}))
+                .json(&json!({"model": model, "input": input, "store": false, "stream": true,
+                    "reasoning": {"effort":"max", "summary":"auto"}}))
         };
         assert_eq!(
             call("fixture-desktop-key", "fixture-model", json!("test prompt"))
@@ -1993,6 +1999,7 @@ mod tests {
                 model: model.into(),
                 key: "fixture-codex-key".into(),
                 upstream_key: key.into(),
+                effort: None,
             })));
         };
         select(turns[0].0, turns[0].1);

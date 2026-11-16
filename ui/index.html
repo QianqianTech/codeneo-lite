@@ -57,6 +57,10 @@
                   <button type="button" id="open-client" hidden>打开客户端</button>
                   <button type="button" id="restart-client" hidden>重启客户端</button>
                   <button type="button" id="terminal-client" hidden>在终端启动</button>
+                  <label id="code-effort-field" class="client-effort" hidden>
+                    <span>新会话思考强度</span>
+                    <select id="code-effort"></select>
+                  </label>
                 </div>
                 <dl class="current-values">
                   <div><dt id="current-model-label">当前模型</dt><dd id="current-model"></dd></div>
@@ -402,7 +406,7 @@
               </dl>
             </section>
             <dl class="usage-estimate">
-              <dt>公开 API 估价 · 人民币</dt>
+              <dt id="usage-cost-label">公开 API 估价 · 人民币</dt>
               <dd class="usage-hero-value" id="usage-cost">—</dd>
               <dd class="muted" id="usage-cost-caption">仅估算已统计且有公开单价的记录</dd>
               <dd id="usage-cost-note" hidden></dd>
@@ -430,6 +434,7 @@
               <details class="usage-pricing">
                 <summary>计价说明 <span id="usage-pricing-date"></span></summary>
                 <p class="muted">按模型公开 API 价估算，有上下限时取中点，金额按元显示。实际费用和订阅用量请查看服务商账单。</p>
+                <p class="muted">套餐专属模型、未收录价格或缺少计价依据的记录会单独说明，Token 仍计入总量。有未折算用量时，金额显示已估算小计。单价随应用更新，各来源的核对日期可在链接上查看。</p>
                 <p class="muted" id="usage-exchange"></p>
               </details>
             </div>
@@ -459,13 +464,13 @@
       </div>
     </form>
   </dialog>
-  <dialog id="restart-dialog" aria-labelledby="restart-title" aria-describedby="restart-description">
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description">
     <form method="dialog">
-      <h2 id="restart-title"></h2>
-      <p id="restart-description" class="muted">重启会退出当前窗口。请先保存正在进行的工作。</p>
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-description" class="muted"></p>
       <div class="button-row">
         <button type="submit" value="cancel" class="secondary" autofocus>取消</button>
-        <button type="submit" value="restart" class="primary">确认重启</button>
+        <button type="submit" value="confirm" class="primary" id="confirm-action"></button>
       </div>
     </form>
   </dialog>

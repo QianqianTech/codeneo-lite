@@ -13,13 +13,13 @@
     { id: "cache-write", label: "缓存写", amount: tokens => tokens.cache_write + tokens.cache_write_long },
     { id: "output", label: "输出", amount: tokens => tokens.output },
   ];
-  const sources = {
-    anthropic: ["Anthropic 官方价", "https://platform.claude.com/docs/en/about-claude/pricing"],
-    openai: ["OpenAI 官方价", "https://developers.openai.com/api/docs/pricing"],
-    deepseek: ["DeepSeek 峰谷价", "https://api-docs.deepseek.com/quick_start/pricing/"],
-    qwen_max: ["百炼官方价 · 北京", "https://help.aliyun.com/zh/model-studio/qwen3-8-max"],
-    qwen_flash: ["百炼官方价 · 北京", "https://help.aliyun.com/zh/model-studio/qwen3-8-flash"],
-    kimi: ["Kimi 官方价", "https://www.kimi.com/resources/kimi-k3-1-pro-pricing"],
+  const reasons = {
+    missing_price: ["价格待补充", "Token 已统计，当前价格表尚未收录此模型。"],
+    plan_only: ["套餐计费", "仅支持 Token Plan，暂无按量 API 单价。"],
+    dynamic_model: ["实际模型待确认", "记录为路由或套餐模型名，无法确定实际模型单价。"],
+    unknown_provider: ["服务商待确认", "记录未提供可核验的服务商，暂无法选择单价。"],
+    provider_mismatch: ["服务商价格待核对", "现有单价不适用于记录中的服务商。"],
+    request_detail_required: ["缺少逐次请求明细", "该模型按请求长度分档，汇总用量无法确定单价。"],
   };
   let report = null;
   let reportDays;
@@ -55,15 +55,32 @@
     return link;
   }
 
-  function addCost(cell, estimate) {
-    if (!estimate) {
-      cell.append(element("span", "muted", "未纳入 API 估价"));
-      return;
-    }
-    cell.append(element("strong", "usage-row-price", costText(estimate)));
-    const source = sources[estimate.source];
+  function priceReference(cell, id) {
+    const source = report.pricing_sources?.find(item => item.id === id);
     if (!source) return;
-    cell.append(sourceLink(...source, estimate.source));
+    const link = sourceLink(source.label, source.url, source.id);
+    link.title = `核对于 ${source.verified}`;
+    cell.append(link);
+  }
+
+  function unpricedItems(row) {
+    return row.unpriced?.length ? row.unpriced : row.estimate ? [] : [{ reason: "missing_price" }];
+  }
+
+  function addCost(cell, row) {
+    const unpriced = unpricedItems(row);
+    if (row.estimate) {
+      cell.append(element("strong", "usage-row-price", costText(row.estimate)));
+      if (unpriced.length) cell.append(element("small", "muted", "已估算部分用量"));
+      priceReference(cell, row.estimate.source);
+    }
+    for (const item of unpriced) {
+      const [label, detail] = reasons[item.reason] || reasons.missing_price;
+      const note = element("div", "usage-price-status");
+      note.append(element("span", "", label), element("small", "muted", detail));
+      priceReference(note, item.source);
+      cell.append(note);
+    }
   }
 
   function metricCell(label, className) {
@@ -109,7 +126,7 @@
       tr.append(cell);
     }
     const cost = metricCell("API 估价", "usage-row-cost");
-    addCost(cost, row.estimate);
+    addCost(cost, row);
     tr.append(cost);
     return tr;
   }
@@ -129,7 +146,9 @@
     const input = uncached + cacheRead + cacheWrite;
     const total = input + output;
     const priced = rows.filter(row => row.estimate);
-    const unknown = rows.length - priced.length;
+    const omitted = rows.filter(row => unpricedItems(row).length);
+    const pricedTokens = rows.reduce((sum, row) => sum + (row.priced_tokens
+      ?? (row.estimate ? tokenColumns.reduce((total, column) => total + column.amount(row.tokens), 0) : 0)), 0);
     const unavailable = coverage.length > 0 && coverage.every(item => ["unsupported", "native"].includes(item.state));
     const unreadable = !rows.length && partial.length > 0;
     setTokens($("usage-total"), unavailable || unreadable ? null : total);
@@ -145,10 +164,22 @@
       high_cny: total.high_cny + estimate.high_cny,
     }), { low_cny: 0, high_cny: 0 });
     $("usage-cost").textContent = priced.length ? costText(totalCost) : "—";
-    $("usage-cost-caption").hidden = !priced.length;
-    $("usage-cost-note").hidden = !unknown;
-    $("usage-cost-note").textContent = unknown ? `${unknown} 条明细未纳入估价` : "";
-    $("usage-pricing-date").textContent = `价格核对于 ${report.pricing_verified}`;
+    $("usage-cost-label").textContent = omitted.length ? "已估算小计 · 人民币" : "公开 API 估价 · 人民币";
+    $("usage-cost-caption").hidden = !rows.length;
+    // Do not round incomplete coverage up to 100%.
+    const coveragePercent = total ? Math.min(pricedTokens / total, omitted.length ? 0.999 : 1) : 0;
+    $("usage-cost-caption").textContent = `已估算 ${percent.format(coveragePercent)} Token 的参考费用${omitted.length ? "，其余见明细说明" : ""}`;
+    const issues = new Map();
+    for (const row of omitted) {
+      for (const reason of new Set(unpricedItems(row).map(item => item.reason))) {
+        issues.set(reason, (issues.get(reason) || 0) + 1);
+      }
+    }
+    $("usage-cost-note").hidden = !issues.size;
+    $("usage-cost-note").textContent = [...issues].map(([reason, count]) =>
+      `${count} 项${(reasons[reason] || reasons.missing_price)[0]}`).join(" · ");
+    $("usage-pricing-date").textContent = [report.app_version ? `CodeNeo Lite ${report.app_version}` : "",
+      `价格表更新于 ${report.pricing_verified}`].filter(Boolean).join(" · ");
     $("usage-exchange").replaceChildren(sourceLink(
       `汇率基准 ${report.exchange_rate_date} · 1 美元 = ${report.usd_to_cny} 元人民币`, report.exchange_rate_source, "exchange",
     ));

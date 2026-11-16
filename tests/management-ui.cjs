@@ -47,6 +47,10 @@ async function main() {
         status: { ...official, state: 'uninitialized', account: '尚无用户配置' },
       });
       window.launches = [];
+      window.prepareCodeEfforts = levels => {
+        clients[1].status = { ...official, state: 'lite', selected: 'k3.1-pro-profile',
+          model: 'k3.1-pro', code_efforts: levels };
+      };
       window.switches = [];
       window.gatewayAvailable = true;
       const presets = [
@@ -90,7 +94,10 @@ async function main() {
       };
       window.__TAURI__ = { core: { invoke: async (command, args) => {
         const client = clients.find(client => client.id === args?.client);
-        if (command === 'lite_overview') return structuredClone(view);
+        if (command === 'lite_overview') {
+          if (window.pendingOverview) await window.pendingOverview;
+          return structuredClone(view);
+        }
         if (command === 'lite_gateway_ready') return window.gatewayAvailable && clients.some(client => client.status.gateway_ready);
         if (command === 'open_agent_help') { window.openedAgentHelp = args; return; }
         if (command === 'apply_agent_models') {
@@ -103,6 +110,7 @@ async function main() {
         if (command === 'launch_client') {
           if (!client.launch[args.action] || client.status.pending) throw '此客户端无法使用该启动方式';
           window.launches.push([client.id, args.action]);
+          window.lastLaunchEffort = args.codeEffort;
           if (args.action === 'restart') return `${client.name} 已重启。`;
           return `已请求启动 ${client.name}。`;
         }
@@ -319,22 +327,31 @@ async function main() {
               estimate: { low_cny: 2202.6629, high_cny: 2202.6629, source: 'openai' } },
             { client: 'code', model: 'qwen3.8-max', tokens: { input: 321908, output: 1728598, cache_read: 246064647, cache_write: 8298055, cache_write_long: 0 },
               estimate: { low_cny: 436.6279, high_cny: 559.6602, source: 'qwen_max' } },
-            { client: 'code', model: 'qwen4.0-max-preview', tokens: { input: 103776, output: 263214, cache_read: 52673727, cache_write: 1945866, cache_write_long: 0 }, estimate: null },
-            { client: 'codex', model: 'codex-auto-review', tokens: { input: 4495462, output: 62816, cache_read: 29899008, cache_write: 0, cache_write_long: 0 }, estimate: null },
+            { client: 'code', model: 'qwen4.0-max-preview', tokens: { input: 103776, output: 263214, cache_read: 52673727, cache_write: 1945866, cache_write_long: 0 }, estimate: null,
+              unpriced: [{ reason: 'plan_only', source: 'qwen_preview' }] },
+            { client: 'codex', model: 'codex-auto-review', tokens: { input: 4495462, output: 62816, cache_read: 29899008, cache_write: 0, cache_write_long: 0 }, estimate: null,
+              unpriced: [{ reason: 'dynamic_model', source: null }] },
             { client: 'desktop', model: 'qwen3.8-max', tokens: { input: 318, output: 22414, cache_read: 3023462, cache_write: 536913, cache_write_long: 0 },
               estimate: { low_cny: 11.8879, high_cny: 13.3996, source: 'qwen_max' } },
           ];
           return {
-            pricing_verified: '2026-11-13',
+            app_version: '0.1.8', pricing_verified: '2026-11-16',
+            pricing_sources: [
+              { id: 'openai', label: 'OpenAI 官方价', url: 'https://developers.openai.com/api/docs/pricing', verified: '2026-11-13' },
+              { id: 'qwen_max', label: '百炼官方价 · 北京', url: 'https://help.aliyun.com/zh/model-studio/qwen3-8-max', verified: '2026-11-13' },
+              { id: 'glm', label: '智谱官方价', url: 'https://docs.bigmodel.cn/cn/guide/start/pricing', verified: '2026-11-16' },
+              { id: 'qwen_preview', label: 'Token Plan 官方说明', url: 'https://help.aliyun.com/zh/model-studio/qwen4-max-preview', verified: '2026-11-16' },
+            ],
             exchange_rate_date: '2026-11-12', usd_to_cny: 6.7174,
             exchange_rate_source: 'https://xinhuanet.com.cn/20261112/97116e6012634afcaefaa35c8e5f9a92/c.html',
-            rows: args.days === 30 ? largeUsage : args.days === 1 ? [] : [
+            rows: window.usageRows || (args.days === 30 ? largeUsage : args.days === 1 ? [] : [
               { client: 'codex', model: 'gpt-6.1-sol', tokens: { input: 250, output: 500, cache_read: 1000, cache_write: 0, cache_write_long: 0 },
                 estimate: { low_cny: 0.03761744, high_cny: 0.03761744, source: 'openai' } },
               { client: 'desktop', model: 'qwen3.8-max', tokens: { input: 500, output: 150, cache_read: 100, cache_write: 30, cache_write_long: 20 },
                 estimate: { low_cny: 0.01225, high_cny: 0.0123, source: 'qwen_max' } },
-              { client: 'code', model: 'glm-5.3', tokens: { input: 70, output: 10, cache_read: 0, cache_write: 0, cache_write_long: 0 }, estimate: null },
-            ],
+              { client: 'code', model: 'glm-5.3', tokens: { input: 70, output: 10, cache_read: 0, cache_write: 0, cache_write_long: 0 },
+                estimate: { low_cny: 0.00084, high_cny: 0.00084, source: 'glm' } },
+            ]),
             coverage: clients.map(({ id }) => ({ client: id, state: id === 'workbuddy' ? 'unsupported'
               : args.days === 1 ? 'empty' : args.days === 30 && id === 'codex' ? 'partial' : 'available' })),
           };
@@ -550,9 +567,21 @@ async function main() {
     await page.getByRole('button', { name: '保存档案' }).click();
     const savedKimi = page.locator('.saved-model').filter({ has: page.getByRole('heading', { name: 'k3-256k', exact: true }) });
     await savedKimi.waitFor();
-    page.once('dialog', dialog => dialog.accept());
+    const removeKimiDialog = page.getByRole('dialog', { name: '删除「k3-256k」？', exact: true });
     await savedKimi.getByRole('button', { name: '删除', exact: true }).click();
+    await removeKimiDialog.getByRole('button', { name: '取消', exact: true }).click();
+    assert.ok(await savedKimi.isVisible());
+    await savedKimi.getByRole('button', { name: '删除', exact: true }).click();
+    await page.evaluate(() => {
+      window.pendingOverview = new Promise(resolve => { window.resumeOverview = resolve; });
+    });
+    await removeKimiDialog.getByRole('button', { name: '确认删除', exact: true }).click();
     await savedKimi.waitFor({ state: 'detached' });
+    await page.getByText('模型档案已删除。', { exact: true }).waitFor();
+    await page.evaluate(() => {
+      window.resumeOverview();
+      delete window.pendingOverview;
+    });
 
     await catalogTab.click();
     assert.equal(await provider('Kimi Code').getByText('k3-256k', { exact: true }).count(), 0);
@@ -563,11 +592,12 @@ async function main() {
     await page.getByText('接入名称（可选）', { exact: true }).click();
     await page.getByLabel('接入名称', { exact: true }).fill('测试备用账号');
     await page.getByRole('button', { name: '手动选择模型', exact: true }).click();
-    await page.getByRole('checkbox', { name: 'k3-256k', exact: true }).check();
+    await page.getByRole('checkbox', { name: 'k3', exact: true }).check();
     await page.getByRole('button', { name: '保存档案', exact: true }).click();
-    await savedKimi.getByText('Kimi Code · 测试备用账号', { exact: true }).waitFor();
+    const standaloneK3 = page.locator('.saved-model').filter({ has: page.getByRole('heading', { name: 'k3', exact: true }) });
+    await standaloneK3.getByText('Kimi Code · 测试备用账号', { exact: true }).waitFor();
     await catalogTab.click();
-    await provider('Kimi Code').getByRole('button', { name: '查看已配置模型 k3-256k', exact: true }).waitFor();
+    await provider('Kimi Code').getByRole('button', { name: '查看已配置模型 k3', exact: true }).waitFor();
     await provider('Kimi Code').getByRole('button', { name: '拉取 Kimi Code 模型', exact: true }).click();
     assert.equal(await page.locator('#account-picker').inputValue(), '');
     await page.locator('#account-picker').selectOption({ label: '测试备用账号' });
@@ -576,9 +606,15 @@ async function main() {
     assert.equal(await defaultId(), 'k3.1-pro-highspeed');
     await page.getByRole('button', { name: '返回模型库', exact: true }).click();
     await savedTab.click();
-    page.once('dialog', dialog => dialog.accept());
-    await savedKimi.getByRole('button', { name: '删除', exact: true }).click();
-    await savedKimi.waitFor({ state: 'detached' });
+    await modelSearch.fill('k3');
+    const kimiProfile = page.locator('.saved-model').filter({ has: page.getByRole('heading', { name: 'Kimi 工作档', exact: true }) });
+    assert.ok(await kimiProfile.getByRole('button', { name: '删除', exact: true }).isDisabled());
+    await standaloneK3.getByRole('button', { name: '删除', exact: true }).click();
+    await page.getByRole('dialog', { name: '删除「k3」？', exact: true })
+      .getByRole('button', { name: '确认删除', exact: true }).click();
+    await standaloneK3.waitFor({ state: 'detached' });
+    assert.equal(await modelSearch.inputValue(), 'k3');
+    await kimiProfile.getByText('k3', { exact: true }).waitFor();
 
     await nav('客户端').click();
     await page.getByText('恢复与撤销', { exact: true }).click();
@@ -615,6 +651,16 @@ async function main() {
     await page.getByText('已取消等待中的切换。').waitFor();
     await page.getByRole('button', { name: '在终端启动', exact: true }).click();
     await page.getByText('已请求启动 Claude Code。', { exact: true }).waitFor();
+    const codeEffort = page.getByLabel('新会话思考强度');
+    assert.ok(!(await codeEffort.isVisible()));
+    await page.evaluate(() => window.prepareCodeEfforts(['low', 'high', 'max']));
+    await page.locator('#refresh-clients').click();
+    await codeEffort.waitFor();
+    assert.deepEqual(await codeEffort.locator('option').evaluateAll(opts => opts.map(opt => opt.value)), ['', 'low', 'high', 'max']);
+    await codeEffort.selectOption('max');
+    await page.getByRole('button', { name: '在终端启动', exact: true }).click();
+    await page.getByText('已请求启动 Claude Code。', { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.lastLaunchEffort), 'max');
 
     await client('Codex').click();
     await page.getByRole('button', { name: '打开 Codex', exact: true }).click();
@@ -859,7 +905,11 @@ async function main() {
     assert.ok(await page.getByRole('link', { name: /1 美元 = 6.7174 元人民币/ }).isVisible());
     await page.locator('.usage-pricing summary').click();
     assert.match(await page.locator('#usage-cost').innerText(), /^< [¥￥]1$/);
-    assert.ok(await page.getByText('未纳入 API 估价', { exact: true }).isVisible());
+    assert.ok(await page.getByRole('link', { name: '智谱官方价' }).isVisible());
+    assert.equal(await page.getByRole('link', { name: '智谱官方价' }).getAttribute('title'), '核对于 2026-11-16');
+    assert.equal(await page.locator('#usage-cost-caption').innerText(), '已估算 100% Token 的参考费用');
+    assert.equal(await page.locator('#usage-pricing-date').innerText(), 'CodeNeo Lite 0.1.8 · 价格表更新于 2026-11-16');
+    assert.equal(await page.locator('#usage-cost-note').isVisible(), false);
     assert.equal(await page.locator('#usage-partial').isVisible(), false);
     await page.locator('#usage-client').selectOption('workbuddy');
     await page.getByText('此客户端暂无可读取的本机 Token 明细。', { exact: true }).waitFor();
@@ -875,7 +925,11 @@ async function main() {
     assert.equal(await page.locator('#usage-input').innerText(), '1,757.22 M');
     assert.equal(await page.locator('#usage-output').innerText(), '5.77 M');
     assert.match(await page.locator('#usage-cost').innerText(), /^约 [¥￥]2,713$/);
-    assert.equal(await page.locator('#usage-cost-note').innerText(), '2 条明细未纳入估价');
+    assert.equal(await page.locator('#usage-cost-label').innerText(), '已估算小计 · 人民币');
+    assert.equal(await page.locator('#usage-cost-note').innerText(), '1 项套餐计费 · 1 项实际模型待确认');
+    assert.match(await page.locator('#usage-cost-caption').innerText(), /^已估算 94.9% Token/);
+    assert.ok(await page.getByRole('link', { name: 'Token Plan 官方说明' }).isVisible());
+    assert.ok(await page.getByText('仅支持 Token Plan，暂无按量 API 单价。', { exact: true }).isVisible());
     assert.equal(await page.locator('#usage-partial').innerText(), '部分统计：Codex 的本机用量记录未读全。');
     const topModel = page.locator('#usage-rows tr').first();
     assert.equal(await topModel.locator('.usage-row-total .usage-token').innerText(), '1,413.55 M');
@@ -891,7 +945,32 @@ async function main() {
     assert.ok(await page.locator('#usage-partial').isVisible());
     await page.locator('#usage-client').selectOption('desktop');
     assert.equal(await page.locator('#usage-partial').isVisible(), false);
+    assert.equal(await page.locator('#usage-cost-label').innerText(), '公开 API 估价 · 人民币');
+    assert.equal(await page.locator('#usage-cost-note').isVisible(), false);
     await page.locator('#usage-client').selectOption('');
+
+    // Unknown future models and partly priced rows retain their tokens and cannot
+    // turn the subtotal into an apparently complete estimate.
+    await page.evaluate(() => { window.usageRows = [
+      { client: 'desktop', model: 'glm-5.3', tokens: { input: 1000, output: 0, cache_read: 0, cache_write: 0, cache_write_long: 0 },
+        estimate: { low_cny: 0.004, high_cny: 0.004, source: 'glm' }, priced_tokens: 500,
+        unpriced: [{ reason: 'unknown_provider', source: null, tokens: 500 }] },
+      { client: 'desktop', model: 'future-model', tokens: { input: 1000, output: 0, cache_read: 0, cache_write: 0, cache_write_long: 0 },
+        estimate: null, priced_tokens: 0, unpriced: [{ reason: 'missing_price', source: null, tokens: 1000 }] },
+    ]; });
+    await page.locator('#refresh-usage').click();
+    await page.getByText('价格待补充', { exact: true }).waitFor();
+    assert.equal(await page.locator('#usage-total').getAttribute('title'), '2,000 Token');
+    assert.equal(await page.locator('#usage-cost-caption').innerText(), '已估算 25% Token 的参考费用，其余见明细说明');
+    assert.equal(await page.locator('#usage-cost-note').innerText(), '1 项服务商待确认 · 1 项价格待补充');
+    assert.ok(await page.getByText('已估算部分用量', { exact: true }).isVisible());
+    await page.evaluate(() => { window.usageRows.shift(); });
+    await page.locator('#refresh-usage').click();
+    await page.getByText('已估算 0% Token 的参考费用，其余见明细说明', { exact: true }).waitFor();
+    assert.equal(await page.locator('#usage-cost').innerText(), '—');
+    await page.evaluate(() => { delete window.usageRows; });
+    await page.locator('#refresh-usage').click();
+    await page.locator('#usage-total').getByText('1,762.99 M', { exact: true }).waitFor();
 
     await page.evaluate(() => window.prepareAgentModels());
     await nav('客户端').click();
@@ -987,7 +1066,6 @@ async function main() {
     assert.equal(await page.locator('.saved-model').count(), 2);
 
     await libraryProvider.selectOption('kimi');
-    const kimiProfile = page.locator('.saved-model').filter({ has: page.getByRole('heading', { name: 'Kimi 工作档', exact: true }) });
     await kimiProfile.getByRole('button', { name: '编辑', exact: true }).click();
     assert.equal(await page.getByRole('checkbox', { name: 'k3.1-pro', exact: true }).isChecked(), true);
     assert.equal(await page.getByRole('checkbox', { name: 'k3', exact: true }).isChecked(), true);

@@ -38,6 +38,7 @@ const lite = (() => {
   const protocols = {
     anthropic: "Anthropic Messages", responses: "OpenAI Responses", chat_completions: "Chat Completions",
   };
+  const effortLabels = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max" };
   let activeClient = "";
   let activeLaunch = "";
   let refreshSequence = 0;
@@ -455,6 +456,15 @@ const lite = (() => {
     $("open-client").textContent = `打开 ${target.name}`;
     $("restart-client").textContent = `重启 ${target.name}`;
     $("terminal-client").textContent = target.id === "codex" ? "启动 Codex CLI" : "在终端启动";
+    const codeEffort = $("code-effort");
+    const levels = target.id === "code" && controls?.terminal ? target.status.code_efforts || [] : [];
+    const profile = levels.length ? target.status.selected || "" : "";
+    const selectedEffort = codeEffort.dataset.profile === profile ? codeEffort.value : "";
+    codeEffort.dataset.profile = profile;
+    codeEffort.replaceChildren(option("按 Claude Code 设置", ""), ...levels.map(level => option(effortLabels[level], level)));
+    codeEffort.value = levels.includes(selectedEffort) ? selectedEffort : "";
+    codeEffort.disabled = $("terminal-client").disabled;
+    $("code-effort-field").hidden = levels.length === 0;
     $("launch-note").textContent = codexAction && controls?.[codexAction] === false
       ? (codexAction === "terminal" ? "未检测到 codex 命令。安装后刷新状态。" : "未检测到 Codex 桌面应用。")
       : codexAction === "open" ? ""
@@ -464,15 +474,21 @@ const lite = (() => {
     message($("launch-feedback"), feedback?.kind || "", feedback?.text);
   }
 
-  async function confirmRestart(name) {
-    const dialog = $("restart-dialog");
+  async function confirmAction(title, description, label) {
+    const dialog = $("confirm-dialog");
     if (dialog.open) return false;
-    $("restart-title").textContent = `重启 ${name}？`;
+    $("confirm-title").textContent = title;
+    $("confirm-description").textContent = description;
+    $("confirm-action").textContent = label;
     dialog.returnValue = "";
     return new Promise(resolve => {
-      dialog.addEventListener("close", () => resolve(dialog.returnValue === "restart"), { once: true });
+      dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true });
       dialog.showModal();
     });
+  }
+
+  function confirmRestart(name) {
+    return confirmAction(`重启 ${name}？`, "重启会退出当前窗口。请先保存正在进行的工作。", "确认重启");
   }
 
   async function startClient(action) {
@@ -480,11 +496,12 @@ const lite = (() => {
     if (!invoke || !target?.launch?.[action] || running.has(target.id)) return;
     if (action === "restart" && !(await confirmRestart(target.name))) return;
     const { id } = target;
+    const codeEffort = id === "code" && action === "terminal" ? $("code-effort").value : "";
     running.add(id);
     launchMessages.set(id, { kind: "pending", text: action === "restart" ? "正在重启客户端…" : "正在打开客户端…" });
     renderClients();
     try {
-      const result = await invoke("launch_client", { client: id, action });
+      const result = await invoke("launch_client", codeEffort ? { client: id, action, codeEffort } : { client: id, action });
       launchMessages.set(id, { kind: "success", text: result });
       const configured = clientMessages.get(id);
       if (configured) configured.actionable = false;
@@ -608,7 +625,7 @@ const lite = (() => {
   }
 
   const api = {
-    $, invoke, element, button, option, message, errorText, protocols,
+    $, invoke, element, button, option, message, errorText, confirmAction, protocols,
     client, canApply, show, showClient, showSavedProfile, selectProfile, openClientPanel, refresh, clientAction, codeRoles,
     page: "clients", data: { clients: [], presets: [], accounts: [], models: [], in_use: [] },
   };

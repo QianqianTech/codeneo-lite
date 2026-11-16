@@ -62,8 +62,9 @@ fn row(
     let provider = provider
         .map(|id| safe_model(Some(id)))
         .filter(|id| *id != "未知模型");
-    let estimate =
-        provider.and_then(|id| usage_prices::for_provider(id, model, tokens, per_request));
+    let estimate = provider
+        .ok_or_else(usage_prices::Unpriced::provider_unknown)
+        .and_then(|id| usage_prices::for_provider(id, model, tokens, per_request));
     add_usage(rows, client, model, provider, tokens, estimate);
 }
 
@@ -248,7 +249,7 @@ fn qwen(
                 safe_model(record["model"].as_str()),
                 account_type,
                 tokens,
-                None,
+                Err(usage_prices::Unpriced::provider_unknown()),
             );
         })
     }))
@@ -383,7 +384,14 @@ fn codebuddy(
         })
     });
     for (_, (model, tokens)) in messages {
-        add_usage(rows, Client::Codebuddy, &model, None, tokens, None);
+        add_usage(
+            rows,
+            Client::Codebuddy,
+            &model,
+            None,
+            tokens,
+            Err(usage_prices::Unpriced::provider_unknown()),
+        );
     }
     Ok(complete)
 }
@@ -452,6 +460,7 @@ fn copilot(
                 };
                 let estimate = provider
                     .as_deref()
+                    .ok_or_else(usage_prices::Unpriced::provider_unknown)
                     .and_then(|provider| usage_prices::for_provider(provider, model, tokens, true));
                 add_usage(
                     rows,
@@ -491,6 +500,11 @@ mod tests {
         assert_eq!(official.tokens.total(), 110);
         assert!(official.estimate.is_some());
         assert!(rows["gpt-5.4-mini\nrouter"].estimate.is_none());
-        assert!(usage_prices::for_provider("openai", "gpt-5.4", official.tokens, false).is_none());
+        assert_eq!(
+            usage_prices::for_provider("openai", "gpt-5.4", official.tokens, false)
+                .unwrap_err()
+                .reason,
+            usage_prices::Reason::RequestDetailRequired
+        );
     }
 }

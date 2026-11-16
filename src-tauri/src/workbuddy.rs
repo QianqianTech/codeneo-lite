@@ -1,5 +1,6 @@
 use crate::{
     clients::{ClientView, Outcome},
+    model_effort,
     model_transport as http,
     models::{self, Store},
     transaction::{self, Client, Plan},
@@ -12,6 +13,24 @@ const LEGACY_VENDOR: &str = "CodeNeo Lite";
 
 pub fn model_fields(id: &str, name: &str, url: &str, key: &str) -> Value {
     json!({"id":id, "name":name, "vendor":VENDOR, "url":url, "apiKey":key})
+}
+
+pub(crate) fn add_reasoning_fields(
+    entry: &mut Value,
+    account: &models::Account,
+    protocol: models::Protocol,
+    model: &str,
+    catalogs: &model_effort::Accounts,
+) {
+    if let Some(effort) = model_effort::options(account, protocol, model, catalogs)
+        .within(&http::EffortLevel::STANDARD)
+    {
+        entry["supportsReasoning"] = json!(true);
+        entry["reasoning"] = json!({"supportedEfforts":effort.levels});
+        if let Some(default) = effort.default {
+            entry["reasoning"]["defaultEffort"] = json!(default);
+        }
+    }
 }
 
 pub fn path() -> Result<PathBuf, String> {
@@ -91,6 +110,10 @@ pub fn add_many(
     ids: &[&str],
     paths: &[PathBuf],
 ) -> Result<Outcome, String> {
+    let selected = ids.iter().filter_map(|id| store.model(id).ok().map(|(model, _)| model));
+    let catalogs = tauri::async_runtime::block_on(model_effort::discover(
+        root, Client::Workbuddy, store, selected,
+    ));
     let mut plan = Plan::open(path)?;
     let mut registered = array(&plan, "models")?.to_vec();
     let mut visible = array(&plan, "availableModels")?.to_vec();
@@ -100,7 +123,7 @@ pub fn add_many(
         models::require_model(Client::Workbuddy, model, account)?;
         let model_id = http::provider_api_model(&model.model)?;
         let key = models::key(root, account)?;
-        let fields = model_fields(
+        let mut fields = model_fields(
             &model_id,
             &model.name,
             &models::openai_endpoint(
@@ -110,19 +133,21 @@ pub fn add_many(
             ),
             &key,
         );
+        let protocol = models::Protocol::ChatCompletions;
+        add_reasoning_fields(&mut fields, account, protocol, &model_id, &catalogs);
         if let Some(existing) = registered.iter_mut().find(|entry| entry["id"] == model_id) {
             if !matches!(existing["vendor"].as_str(), Some(VENDOR | LEGACY_VENDOR)) {
                 return Err("WorkBuddy 已有同名模型，请在 WorkBuddy 中核对现有配置".into());
             }
-            existing
-                .as_object_mut()
-                .expect("entry with model id is an object")
-                .extend(
-                    fields
-                        .as_object()
-                        .expect("model fields are an object")
-                        .clone(),
-                );
+            let refresh_reasoning = existing["url"] != fields["url"]
+                || existing["apiKey"] != fields["apiKey"]
+                || model_effort::declared(account, protocol, &model_id, &catalogs).is_some();
+            let existing = existing.as_object_mut().expect("entry with model id is an object");
+            if refresh_reasoning && fields.get("reasoning").is_none() {
+                existing.remove("supportsReasoning");
+                existing.remove("reasoning");
+            }
+            existing.extend(fields.as_object().expect("model fields are an object").clone());
         } else {
             registered.push(fields);
         }
@@ -182,6 +207,7 @@ mod tests {
             current["models"][1]["url"],
             "https://api.openai.com/v1/chat/completions"
         );
+        assert_eq!(current["models"][1]["reasoning"]["supportedEfforts"], json!(["low", "medium", "high", "xhigh", "max"]));
         assert_eq!(
             current["availableModels"],
             json!(["existing", "gpt-6.1-sol", "gpt-5.4-mini"])

@@ -1,13 +1,14 @@
 {
   "name": "codeneo-lite",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "private": true,
   "license": "MIT",
   "scripts": {
     "postinstall": "npm --prefix mcp/playwright install --omit=dev --package-lock=false --ignore-scripts --no-audit --no-fund",
     "dev": "tauri dev",
     "build": "tauri build",
-    "test:ui": "node tests/management-ui.cjs && node tests/setup-ui.cjs"
+    "test:ui": "node tests/management-ui.cjs && node tests/setup-ui.cjs",
+    "verify:macos": "python3 scripts/verify-macos-package.py"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.4",

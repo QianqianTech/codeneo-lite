@@ -185,13 +185,13 @@ button:disabled, select:disabled, input:disabled, textarea:disabled { opacity: .
 .text-button:enabled:hover { color: var(--ink); }
 .danger:enabled { color: var(--error); }
 :where(input, select, textarea, button, summary, a, .usage-table):focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
-#restart-dialog, #mcp-permissions-dialog {
+#confirm-dialog, #mcp-permissions-dialog {
   width: min(360px, calc(100% - 32px)); padding: 20px;
   color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--panel-radius);
 }
-#restart-dialog::backdrop, #mcp-permissions-dialog::backdrop { background: rgb(0 0 0 / 36%); }
-#restart-dialog p { margin-block: 8px 16px; }
-#restart-dialog .button-row { justify-content: flex-end; }
+#confirm-dialog::backdrop, #mcp-permissions-dialog::backdrop { background: rgb(0 0 0 / 36%); }
+#confirm-dialog p { margin-block: 8px 16px; }
+#confirm-dialog .button-row { justify-content: flex-end; }
 .search { position: relative; display: block; min-width: 0; }
 .search input { padding-inline-start: 31px; }
 .search::before, .search::after { content: ""; position: absolute; z-index: 1; pointer-events: none; }
@@ -265,6 +265,8 @@ button:disabled, select:disabled, input:disabled, textarea:disabled { opacity: .
 }
 .client-launch { margin-bottom: 14px; }
 .client-launch button { max-width: 100%; overflow-wrap: anywhere; }
+.client-effort { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.client-effort select { width: auto; }
 #launch-note { margin-top: 12px; color: var(--muted); }
 .client-config { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
 .client-config .section-heading { margin-bottom: 14px; }
@@ -637,6 +639,9 @@ details > summary:hover { color: var(--ink); }
 .usage-row-total progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
 .usage-row-total progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
 .usage-row-price { display: block; }
+.usage-price-status { margin-top: 4px; }
+.usage-price-status > span, .usage-price-status > small { display: block; }
+.usage-price-status > small { margin: 3px 0; font-size: 12px; line-height: 1.5; }
 .usage-cell-label { display: none; }
 .source-link { color: inherit; text-underline-offset: 2px; }
 .usage-notes { display: grid; gap: 7px; margin-top: 11px; }

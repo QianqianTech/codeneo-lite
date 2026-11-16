@@ -15,6 +15,8 @@ mod jsonc;
 mod launch;
 mod mcp;
 mod models;
+mod model_effort;
+mod package_check;
 mod remote;
 mod secrets;
 mod setup;
@@ -123,8 +125,12 @@ fn append_issue(status: &mut serde_json::Value, error: String) {
 }
 
 #[tauri::command]
-async fn launch_client(client: Client, action: launch::Action) -> Result<String, String> {
-    launch::run(client, action).await
+async fn launch_client(
+    client: Client,
+    action: launch::Action,
+    code_effort: Option<model_transport::EffortLevel>,
+) -> Result<String, String> {
+    launch::run_with_effort(client, action, code_effort).await
 }
 
 #[tauri::command]
@@ -502,6 +508,20 @@ fn start_pending_check(app: tauri::AppHandle) {
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let flag = args.next();
+    if flag.as_deref() == Some(std::ffi::OsStr::new("--check-package")) {
+        if args.next().is_some() {
+            eprintln!("--check-package 不接受额外参数");
+            std::process::exit(2);
+        }
+        match package_check::run() {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if flag.as_deref() == Some(std::ffi::OsStr::new(codex::KEY_FLAG)) {
         let reference = args.next().and_then(|arg| arg.into_string().ok());
         let result = reference

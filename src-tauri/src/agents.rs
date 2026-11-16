@@ -2,6 +2,8 @@ use crate::{
     clients::{ClientView, Outcome},
     launch,
     mcp::Transport,
+    model_effort,
+    model_transport::EffortLevel,
     models::{self, Protocol, Store},
     transaction::{self, Client, Field, Plan},
 };
@@ -474,11 +476,10 @@ impl Route<'_> {
         format!("codeneo-{}", self.saved.id)
     }
     fn endpoint(&self) -> String {
-        if self.protocol == Anthropic {
-            self.account.base_for(Anthropic).to_owned()
-        } else {
-            models::openai_endpoint(self.account, self.protocol, "")
-        }
+        model_effort::endpoint(self.account, self.protocol)
+    }
+    fn effort(&self, catalogs: &model_effort::Accounts) -> model_effort::Options {
+        model_effort::options(self.account, self.protocol, &self.model, catalogs)
     }
     fn selection_id(&self, client: Client) -> String {
         match client {
@@ -523,7 +524,12 @@ fn route<'a>(
     })
 }
 
-fn opencode(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), String> {
+fn opencode(
+    root: &Path,
+    config: &mut Config,
+    routes: &[Route<'_>],
+    catalogs: &model_effort::Accounts,
+) -> Result<(), String> {
     let mut providers: BTreeMap<String, Value> = BTreeMap::new();
     for route in routes {
         let provider = match providers.entry(route.provider()) {
@@ -543,7 +549,33 @@ fn opencode(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<()
         if provider["models"].get(&route.model).is_some() {
             return Err("同一服务商中包含重复模型 ID".into());
         }
-        provider["models"][&route.model] = json!({"name":route.saved.name, "tool_call":true});
+        let mut entry = json!({"name":route.saved.name, "tool_call":true, "reasoning":false});
+        let supported = if route.protocol == Anthropic {
+            &EffortLevel::STANDARD[..]
+        } else {
+            &EffortLevel::ALL[..]
+        };
+        if let Some(effort) = route.effort(catalogs).within(supported) {
+            entry["reasoning"] = json!(true);
+            let variants = EffortLevel::ALL.into_iter().map(|level| {
+                let variant = if !effort.levels.contains(&level) {
+                    json!({"disabled":true})
+                } else if route.protocol == Anthropic {
+                    let mut variant = json!({"effort":level});
+                    if model_effort::adaptive_anthropic(route.account, &route.model) {
+                        variant["thinking"] = json!({"type":"adaptive"});
+                    }
+                    variant
+                } else if route.protocol == ChatCompletions && model_effort::is_openrouter(route.account, route.protocol) {
+                    json!({"reasoning":{"effort":level}})
+                } else {
+                    json!({"reasoningEffort":level})
+                };
+                (level.as_str().into(), variant)
+            }).collect::<serde_json::Map<String, Value>>();
+            entry["variants"] = Value::Object(variants);
+        }
+        provider["models"][&route.model] = entry;
     }
     for (name, provider) in providers {
         config.insert(&["provider"], &name, provider)?;
@@ -572,7 +604,12 @@ fn insert_model(entries: &mut Vec<Value>, model: Value) -> Result<(), String> {
     Ok(())
 }
 
-fn qwen(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), String> {
+fn qwen(
+    root: &Path,
+    config: &mut Config,
+    routes: &[Route<'_>],
+    catalogs: &model_effort::Accounts,
+) -> Result<(), String> {
     let mut registered = array(&config.plan, &["modelProviders"], "openai")?;
     let mut selected = BTreeSet::new();
     let mut providers = BTreeSet::new();
@@ -589,6 +626,16 @@ fn qwen(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), St
         if route.protocol == Responses {
             entry["wireApi"] = json!("responses");
         }
+        if let Some(effort) = route.effort(catalogs).within(&EffortLevel::STANDARD) {
+            let profile = if route.protocol == Responses || model_effort::is_openrouter(route.account, route.protocol) {
+                "openai-reasoning"
+            } else {
+                "openai-effort"
+            };
+            entry["capabilities"] = json!({"reasoning":{
+                "profile": profile, "efforts": effort.levels, "defaultEffort": effort.fallback()
+            }});
+        }
         if let Some(index) = registered
             .iter()
             .position(|model| model["id"] == route.model)
@@ -601,6 +648,12 @@ fn qwen(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), St
                 .as_object_mut()
                 .ok_or("Qwen Code 模型条目格式无效")?;
             existing.remove("wireApi");
+            if let Some(reasoning) = entry.pointer("/capabilities/reasoning").cloned() {
+                let capabilities = existing.entry("capabilities").or_insert_with(|| json!({}));
+                let capabilities = capabilities.as_object_mut().ok_or("Qwen Code 的模型能力配置必须是对象")?;
+                capabilities.insert("reasoning".into(), reasoning);
+                entry.as_object_mut().expect("model entry").remove("capabilities");
+            }
             existing.extend(entry.as_object().expect("model fields").clone());
         } else {
             insert_model(&mut registered, entry)?;
@@ -611,7 +664,12 @@ fn qwen(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), St
     config.put(&["model"], "name", json!(routes[0].model))
 }
 
-fn codebuddy(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), String> {
+fn codebuddy(
+    root: &Path,
+    config: &mut Config,
+    routes: &[Route<'_>],
+    catalogs: &model_effort::Accounts,
+) -> Result<(), String> {
     let mut registered = array(&config.plan, &[], "models")?;
     let mut visible = array(&config.plan, &[], "availableModels")?;
     let limited = !visible.is_empty();
@@ -632,6 +690,7 @@ fn codebuddy(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(
         if responses {
             entry["api"] = json!("openai-responses");
         }
+        crate::workbuddy::add_reasoning_fields(&mut entry, route.account, route.protocol, &route.model, catalogs);
         insert_model(&mut registered, entry)?;
         if limited && !visible.iter().any(|id| id == &route.model) {
             visible.push(json!(route.model));
@@ -644,7 +703,12 @@ fn codebuddy(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(
     Ok(())
 }
 
-fn kimi(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), String> {
+fn kimi(
+    root: &Path,
+    config: &mut Config,
+    routes: &[Route<'_>],
+    catalogs: &model_effort::Accounts,
+) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for route in routes {
         let provider = route.provider();
@@ -662,19 +726,47 @@ fn kimi(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), St
                 }),
             )?;
         }
+        let mut entry = json!({
+            "provider":provider, "model":route.model, "max_context_size":route.context,
+            "display_name":route.saved.name, "capabilities":["tool_use"]
+        });
+        let options = route.effort(catalogs);
+        if let Some(effort) = options.within(&EffortLevel::STANDARD) {
+            let mut capabilities = vec!["tool_use", "thinking"];
+            if model_effort::kimi_requires_thinking(route.account, route.protocol, &route.model) {
+                capabilities.push("always_thinking");
+            }
+            entry["capabilities"] = json!(capabilities);
+            entry["support_efforts"] = json!(effort.levels);
+            if let Some(default) = effort.fallback() {
+                entry["default_effort"] = json!(default);
+            }
+            if route.protocol != Anthropic && options.levels.contains(&EffortLevel::None) {
+                entry["off_effort"] = json!(EffortLevel::None);
+            }
+            if route.protocol == Anthropic && model_effort::adaptive_anthropic(route.account, &route.model) {
+                entry["adaptive_thinking"] = json!(true);
+            }
+        }
         config.insert(
             &["models"],
             &route.alias(),
-            json!({
-                "provider":provider, "model":route.model, "max_context_size":route.context,
-                "display_name":route.saved.name, "capabilities":["tool_use"]
-            }),
+            entry,
         )?;
     }
     config.put(&[], "default_model", json!(routes[0].alias()))
 }
 
-fn copilot(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(), String> {
+fn copilot(
+    root: &Path,
+    config: &mut Config,
+    routes: &[Route<'_>],
+    catalogs: &model_effort::Accounts,
+) -> Result<(), String> {
+    const SUPPORTED_EFFORTS: [EffortLevel; 7] = [
+        EffortLevel::None, EffortLevel::Minimal, EffortLevel::Low, EffortLevel::Medium,
+        EffortLevel::High, EffortLevel::XHigh, EffortLevel::Max,
+    ];
     let mut providers = array(&config.plan, &[], "providers")?;
     let mut registered = array(&config.plan, &[], "models")?;
     let mut seen = BTreeSet::new();
@@ -703,9 +795,16 @@ fn copilot(root: &Path, config: &mut Config, routes: &[Route<'_>]) -> Result<(),
         {
             return Err("Copilot 已有同名模型，请核对用户配置".into());
         }
-        registered.push(json!({
+        let mut entry = json!({
             "id":id, "name":route.saved.name, "provider":name, "wireModel":route.model, "modelId":route.model
-        }));
+        });
+        if let Some(effort) = route.effort(catalogs).within(&SUPPORTED_EFFORTS) {
+            entry["capabilities"] = json!({"supports":{"reasoning_effort":effort.levels}});
+            if route.protocol == Anthropic && model_effort::adaptive_anthropic(route.account, &route.model) {
+                entry["capabilities"]["supports"]["adaptive_thinking"] = json!("optional");
+            }
+        }
+        registered.push(entry);
     }
     config.put(&[], "providers", json!(providers))?;
     config.put(&[], "models", json!(registered))
@@ -718,6 +817,7 @@ fn prepare_configs(
     previous: &[OwnedField],
     previous_models: &[String],
     paths: Vec<PathBuf>,
+    catalogs: &model_effort::Accounts,
 ) -> Result<Vec<Config>, String> {
     let mut configs: Vec<_> = paths
         .into_iter()
@@ -737,16 +837,16 @@ fn prepare_configs(
     }
     if !routes.is_empty() {
         match client {
-            Opencode => opencode(root, &mut configs[0], routes)?,
-            Qwen => qwen(root, &mut configs[0], routes)?,
+            Opencode => opencode(root, &mut configs[0], routes, catalogs)?,
+            Qwen => qwen(root, &mut configs[0], routes, catalogs)?,
             Codebuddy => {
                 configs[0].put(&[], "model", json!(routes[0].model))?;
                 let catalog = configs.get_mut(1).ok_or("找不到 CodeBuddy 模型配置路径")?;
-                codebuddy(root, catalog, routes)?;
+                codebuddy(root, catalog, routes, catalogs)?;
             }
-            Kimi => kimi(root, &mut configs[0], routes)?,
+            Kimi => kimi(root, &mut configs[0], routes, catalogs)?,
             Copilot => {
-                copilot(root, &mut configs[0], routes)?;
+                copilot(root, &mut configs[0], routes, catalogs)?;
                 let preferences = configs.get_mut(1).ok_or("找不到 Copilot 用户设置路径")?;
                 preferences.put(&[], "model", json!(routes[0].selection_id(Copilot)))?;
                 preferences.edit(&[], "modelProviderId", None)?;
@@ -767,6 +867,11 @@ pub fn apply(
         ensure_compatible(client)?;
     }
     let paths = model_paths(client)?;
+    // Called on the blocking worker. Use the same account snapshot for
+    // discovery and the native configuration transaction.
+    let catalogs = tauri::async_runtime::block_on(model_effort::discover(
+        root, client, store, requested.iter().filter_map(|choice| store.model(&choice.id).ok().map(|(model, _)| model)),
+    ));
     apply_at(
         root,
         client,
@@ -774,6 +879,7 @@ pub fn apply(
         requested,
         paths,
         &crate::clients::allowed(root),
+        &catalogs,
     )
 }
 
@@ -784,6 +890,7 @@ fn apply_at(
     requested: Vec<RequestedModel>,
     paths: Vec<PathBuf>,
     allowed: &[PathBuf],
+    catalogs: &model_effort::Accounts,
 ) -> Result<Outcome, String> {
     if !is_added(client) || spec(client).protocols.is_empty() {
         return Err("请在 Agent 的原生界面配置模型".into());
@@ -824,7 +931,7 @@ fn apply_at(
                 .map(|route| route.selection_id(client))
         })
         .collect();
-    for config in prepare_configs(root, client, &current, &previous, &previous_models, paths)? {
+    for config in prepare_configs(root, client, &current, &previous, &previous_models, paths, catalogs)? {
         owned.extend(config.owned);
         deltas.extend(config.plan.finish());
     }
@@ -1031,7 +1138,7 @@ mod tests {
                     context: default_context(),
                 })
                 .collect();
-            apply_at(root, Qwen, &store, requested, vec![config.clone()], &paths).unwrap();
+            apply_at(root, Qwen, &store, requested, vec![config.clone()], &paths, &Default::default()).unwrap();
         };
         let mut legacy = Config::open(config.clone(), true).unwrap();
         let mut registered = array(&legacy.plan, &["modelProviders"], "openai").unwrap();
@@ -1138,6 +1245,10 @@ mod tests {
             })
             .collect();
         let (_, store) = models::read(root).unwrap();
+        let catalogs = [(store.accounts[0].id.clone(), [
+            ("fixture-a".into(), model_effort::Options { levels: vec![EffortLevel::High, EffortLevel::Max], default: Some(EffortLevel::Max) }),
+            ("fixture-b".into(), model_effort::Options { levels: vec![EffortLevel::High], default: Some(EffortLevel::High) }),
+        ].into())].into();
         let choices: Vec<_> = ids
             .iter()
             .map(|id| {
@@ -1152,7 +1263,7 @@ mod tests {
         let routes = routes(Opencode, &store, &choices).unwrap();
         let path = dir.path().join("opencode.jsonc");
         let mut config = Config::open(path.clone(), true).unwrap();
-        opencode(root, &mut config, &routes).unwrap();
+        opencode(root, &mut config, &routes, &catalogs).unwrap();
         transaction::write_single(config.plan).unwrap();
         let config = Plan::open(&path).unwrap();
         let provider = config
@@ -1161,6 +1272,9 @@ mod tests {
             .unwrap();
         assert_eq!(provider["models"].as_object().unwrap().len(), 2);
         assert_eq!(provider["options"]["apiKey"], "fixture-secret");
+        assert_eq!(provider["models"]["fixture-a"]["variants"]["max"]["reasoningEffort"], "max");
+        assert_eq!(provider["models"]["fixture-a"]["variants"]["low"]["disabled"], true);
+        assert!(provider["models"]["fixture-b"].get("variants").is_none());
         assert_eq!(
             config.get(None, "model").unwrap(),
             Some(&json!(routes[0].selection_id(Opencode)))
@@ -1168,7 +1282,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(&path, "# Kimi settings\n[other]\nname = 'original'\n").unwrap();
         let mut config = Config::open(path.clone(), false).unwrap();
-        kimi(root, &mut config, &routes).unwrap();
+        kimi(root, &mut config, &routes, &catalogs).unwrap();
         transaction::write_single(config.plan).unwrap();
         let saved = Plan::open(&path).unwrap();
         assert_eq!(
@@ -1186,6 +1300,9 @@ mod tests {
             saved.get(None, "default_model").unwrap(),
             Some(&json!(routes[0].alias()))
         );
+        let active = saved.get(Some("models"), &routes[0].alias()).unwrap().unwrap();
+        assert_eq!(active["support_efforts"], json!(["high", "max"]));
+        assert_eq!(active["default_effort"], "max");
         assert_eq!(
             saved
                 .get(Some("providers"), &routes[0].provider())
@@ -1193,5 +1310,22 @@ mod tests {
                 .unwrap()["api_key"],
             "fixture-secret"
         );
+        let mut qwen_config = Config::open(dir.path().join("qwen.json"), true).unwrap();
+        qwen(root, &mut qwen_config, &routes, &catalogs).unwrap();
+        let models = array(&qwen_config.plan, &["modelProviders"], "openai").unwrap();
+        assert_eq!(models[0]["capabilities"]["reasoning"], json!({
+            "profile":"openai-effort", "efforts":["high","max"], "defaultEffort":"max"
+        }));
+        assert!(models[1].get("capabilities").is_none());
+        let mut codebuddy_config = Config::open(dir.path().join("codebuddy.json"), true).unwrap();
+        codebuddy(root, &mut codebuddy_config, &routes, &catalogs).unwrap();
+        let models = array(&codebuddy_config.plan, &[], "models").unwrap();
+        assert_eq!(models[0]["reasoning"], json!({"supportedEfforts":["high","max"], "defaultEffort":"max"}));
+        assert!(models[1].get("supportsReasoning").is_none());
+        let mut copilot_config = Config::open(dir.path().join("copilot.json"), true).unwrap();
+        copilot(root, &mut copilot_config, &routes, &catalogs).unwrap();
+        let models = array(&copilot_config.plan, &[], "models").unwrap();
+        assert_eq!(models[0]["capabilities"]["supports"]["reasoning_effort"], json!(["high", "max"]));
+        assert!(models[1].get("capabilities").is_none());
     }
 }

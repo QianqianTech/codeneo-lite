@@ -21,7 +21,7 @@ enum Mapping {
     HighMax,
     LowMediumHighMax,
     LowMediumXhigh,
-    Catalog([bool; 5]),
+    Catalog([bool; EffortLevel::ALL.len()]),
 }
 
 const SONNET_46: &str = "claude-sonnet-4-6";
@@ -52,7 +52,9 @@ impl Effort {
     }
 
     fn from_catalog(levels: &[EffortLevel], native: Option<Self>) -> Option<Self> {
-        let available = EffortLevel::ALL.map(|level| levels.contains(&level));
+        let available = EffortLevel::ALL.map(|level| {
+            EffortLevel::STANDARD.contains(&level) && levels.contains(&level)
+        });
         if available.iter().filter(|&&supported| supported).count() < 2 {
             return None;
         }
@@ -95,12 +97,12 @@ impl Effort {
             (Mapping::HighMax | Mapping::LowMediumHighMax, "xhigh") => "max",
             (Mapping::LowMediumXhigh, "high" | "max") => "xhigh",
             (Mapping::Catalog(available), value) => {
-                let Some(index) = EffortLevel::ALL
-                    .iter()
-                    .position(|level| level.as_str() == value)
+                let Some(level) = EffortLevel::parse(value)
+                    .filter(|level| EffortLevel::STANDARD.contains(level))
                 else {
                     return false;
                 };
+                let index = level as usize;
                 if available[index] {
                     return false;
                 }
@@ -150,14 +152,34 @@ fn claude_model(model: &str) -> Option<&'static str> {
     .find(|name| *name == undated)
 }
 
-fn model_studio(base: &Url) -> bool {
-    matches!(base.path().trim_end_matches('/'), "/apps/anthropic")
-        && base.host_str().is_some_and(|host| {
+pub(crate) fn model_studio_host(base: &Url) -> bool {
+    base.host_str().is_some_and(|host| {
             matches!(
                 host,
                 "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com"
             ) || host.ends_with(".maas.aliyuncs.com")
         })
+}
+
+fn model_studio(base: &Url) -> bool {
+    base.path().trim_end_matches('/') == "/apps/anthropic" && model_studio_host(base)
+}
+
+pub(crate) fn known_levels(base: &Url, model: &str) -> Option<&'static [EffortLevel]> {
+    use EffortLevel::*;
+    let effort = support(base, model)?;
+    Some(match effort.mapping {
+        Mapping::LowHighMax { .. } => &[Low, High, Max],
+        Mapping::HighMax => &[High, Max],
+        Mapping::LowMediumHighMax => &[Low, Medium, High, Max],
+        Mapping::LowMediumXhigh => &[Low, Medium, XHigh],
+        Mapping::Native => match effort.behaves_as {
+            "claude-opus-4-5" => &[Low, Medium, High],
+            "claude-opus-4-6" | SONNET_46 => &[Low, Medium, High, Max],
+            _ => &EffortLevel::STANDARD,
+        },
+        Mapping::Catalog(_) => return Option::None,
+    })
 }
 
 pub(crate) fn resolve(base: &Url, model: &str, catalog: &Catalog) -> Option<Effort> {

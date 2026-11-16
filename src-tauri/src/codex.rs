@@ -2,6 +2,7 @@ use crate::{
     clients::{ClientView, Outcome},
     codex_inference, desktop,
     gateway::{self, Connection},
+    model_effort,
     model_transport as http,
     models::{self, Applied, Store},
     transaction::{self, Client, Delta, Field, Plan},
@@ -21,6 +22,7 @@ const PROVIDER: &str = "codeneo-lite";
 const PROVIDERS: &str = "model_providers";
 const CATALOG: &str = "codeneo-lite-models.json";
 const CATALOG_SETTING: &str = "model_catalog_json";
+const DESKTOP_EFFORTS: &str = "enabled-reasoning-efforts";
 pub const KEY_FLAG: &str = "--codex-key";
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -35,6 +37,14 @@ pub struct Original {
     official_override: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     catalog: Option<Field>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_effort: Option<DesktopEffort>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct DesktopEffort {
+    original: Field,
+    managed: Value,
 }
 
 pub(crate) enum Target<'a> {
@@ -277,6 +287,7 @@ fn model_catalog(
     primary: &models::Model,
     account: &models::Account,
     using_gateway: bool,
+    catalogs: &model_effort::Accounts,
 ) -> Result<Value, String> {
     let mut seen = BTreeSet::new();
     let mut entries = Vec::new();
@@ -288,7 +299,19 @@ fn model_catalog(
         if !seen.insert(slug.clone()) {
             continue;
         }
-        // Use a text-only catalog entry for endpoints without capability metadata.
+        let effort = model_effort::options(account, models::Protocol::Responses, &slug, catalogs)
+            .within(&http::EffortLevel::ALL);
+        let levels: Vec<_> = effort.iter().flat_map(|effort| &effort.levels)
+            .map(|level| json!({"effort":level, "description": match level {
+                http::EffortLevel::None => "Off",
+                http::EffortLevel::Minimal => "Minimal reasoning",
+                http::EffortLevel::Low => "Light reasoning",
+                http::EffortLevel::Medium => "Balanced reasoning",
+                http::EffortLevel::High => "Deeper reasoning",
+                http::EffortLevel::XHigh => "Extra high reasoning",
+                http::EffortLevel::Max => "Maximum reasoning",
+                http::EffortLevel::Ultra => "Ultra reasoning",
+            }})).collect();
         entries.push(json!({
             "slug": slug,
             "display_name": model.name,
@@ -296,8 +319,8 @@ fn model_catalog(
             "visibility": "list",
             "supported_in_api": true,
             "priority": entries.len(),
-            "default_reasoning_level": "none",
-            "supported_reasoning_levels": [{"effort": "none", "description": "Off"}],
+            "default_reasoning_level": effort.as_ref().and_then(model_effort::Options::fallback),
+            "supported_reasoning_levels": levels,
             "shell_type": "default",
             "base_instructions": "You are a coding assistant. Work with the user in the current workspace.",
             "support_verbosity": false,
@@ -317,6 +340,34 @@ fn restore_catalog(config: &mut Plan, path: &Path, original: &Original) -> Resul
             config.set(None, CATALOG_SETTING, value.value().cloned())?;
         }
     }
+    if let Some(pref) = &original.desktop_effort {
+        if config.get(Some("desktop"), DESKTOP_EFFORTS)? == Some(&pref.managed) {
+            config.set(Some("desktop"), DESKTOP_EFFORTS, pref.original.value().cloned())?;
+        }
+    }
+    Ok(())
+}
+
+fn enable_desktop_efforts(config: &mut Plan, original: &mut Original, entries: &Value) -> Result<(), String> {
+    let current = config.get(Some("desktop"), DESKTOP_EFFORTS)?.cloned();
+    let levels: BTreeSet<_> = entries.as_array().into_iter().flatten()
+        .filter_map(|model| model["supported_reasoning_levels"].as_array()).flatten()
+        .filter_map(|entry| entry["effort"].as_str().and_then(http::EffortLevel::parse))
+        .collect();
+    if levels.is_empty() {
+        if let Some(pref) = original.desktop_effort.take() {
+            if current.as_ref() == Some(&pref.managed) {
+                config.set(Some("desktop"), DESKTOP_EFFORTS, pref.original.value().cloned())?;
+            }
+        }
+    } else {
+        let previous = original.desktop_effort.take()
+            .filter(|pref| current.as_ref() == Some(&pref.managed))
+            .map_or_else(|| Field::from(current), |pref| pref.original);
+        let managed = json!(levels);
+        config.set(Some("desktop"), DESKTOP_EFFORTS, Some(managed.clone()))?;
+        original.desktop_effort = Some(DesktopEffort { original: previous, managed });
+    }
     Ok(())
 }
 
@@ -326,6 +377,7 @@ fn plan_switch(
     store: &Store,
     target: Target<'_>,
     port: Option<u16>,
+    catalogs: &model_effort::Accounts,
 ) -> Result<Change, String> {
     let mut config = Plan::open(path)?;
     let mut state = Plan::open(&models::path(root))?;
@@ -350,6 +402,7 @@ fn plan_switch(
             base_url: None,
             official_override: false,
             catalog: None,
+            desktop_effort: None,
         })
     };
     let mut route = None;
@@ -370,7 +423,6 @@ fn plan_switch(
         } else if previous.catalog.is_none() {
             return Err("Codex 已在使用同名模型目录，请在 Codex 中核对配置。".into());
         }
-        state.set(None, "codex_original", Some(json!(previous)))?;
         let fingerprint = models::route(model, account);
         let previous_gateway = store
             .codex
@@ -380,6 +432,8 @@ fn plan_switch(
             let mut selected =
                 codex_inference::Selection::new(root, id, &fingerprint, previous_gateway)?;
             selected.set_port(port);
+            let slug = http::provider_api_model(&model.model)?;
+            selected.set_effort(model_effort::declared(account, models::Protocol::Responses, &slug, catalogs));
             route = Some(selected.route(root, model, account)?);
             (
                 gateway::codex_url(port),
@@ -424,11 +478,10 @@ fn plan_switch(
             return Err("Codex 已存在同名模型目录文件，请先核对该文件。".into());
         }
         catalog.set(None, "managed_by", Some(json!(PROVIDER)))?;
-        catalog.set(
-            None,
-            "models",
-            Some(model_catalog(store, model, account, route.is_some())?),
-        )?;
+        let entries = model_catalog(store, model, account, route.is_some(), catalogs)?;
+        enable_desktop_efforts(&mut config, &mut previous, &entries)?;
+        state.set(None, "codex_original", Some(json!(previous)))?;
+        catalog.set(None, "models", Some(entries))?;
         deltas.extend(catalog.finish());
         config.set(None, CATALOG_SETTING, Some(native_catalog))?;
         config.set(Some(PROVIDERS), PROVIDER, Some(definition))?;
@@ -541,6 +594,19 @@ pub(crate) async fn switch(root: &Path, target: Target<'_>) -> Result<Outcome, S
     let _lock = crate::clients::lock_for_launch(root, Client::Codex)?;
     let path = path()?;
     let (_, store) = models::read(root)?;
+    let catalogs = if let Target::Profile(id, connection) = target {
+        let (model, account) = store.model(id)?;
+        models::require_model(Client::Codex, model, account)?;
+        let using_gateway = connection.map_or(gateway_selection(&store).is_some(), |conn| conn == Connection::Gateway);
+        model_effort::discover(
+            root, Client::Codex, &store,
+            std::iter::once(model).chain(store.models.iter().filter(|candidate| {
+                !using_gateway && candidate.account == model.account && candidate.id != id
+            })),
+        ).await
+    } else {
+        Default::default()
+    };
     let mut service = gateway::SERVICE.lock().await;
     let port = if let Target::Profile(id, connection) = target {
         let (model, account) = store.model(id)?;
@@ -562,7 +628,7 @@ pub(crate) async fn switch(root: &Path, target: Target<'_>) -> Result<Outcome, S
     } else {
         None
     };
-    let Change { deltas, route, hot } = plan_switch(root, &path, &store, target, port)?;
+    let Change { deltas, route, hot } = plan_switch(root, &path, &store, target, port, &catalogs)?;
     transaction::commit(root, Client::Codex, deltas, &crate::clients::allowed(root))?;
     service.select_codex(route);
     Ok(Outcome {
@@ -597,7 +663,8 @@ mod tests {
         let allowed = [path.clone(), models::path(root), catalog_path(&path)];
         let apply = |target, port, expected_hot| {
             let (_, store) = models::read(root).unwrap();
-            let Change { deltas, route, hot } = plan_switch(root, &path, &store, target, port).unwrap();
+            let Change { deltas, route, hot } =
+                plan_switch(root, &path, &store, target, port, &Default::default()).unwrap();
             assert_eq!(hot, expected_hot);
             transaction::commit(root, Client::Codex, deltas, &allowed).unwrap();
             route
@@ -698,6 +765,7 @@ mod tests {
             &store,
             Target::Profile(&id, Some(Connection::Direct)),
             None,
+            &Default::default(),
         )
         .unwrap();
         transaction::commit(root, Client::Codex, change.deltas, &paths).unwrap();
@@ -724,7 +792,7 @@ mod tests {
             view(&store, &path).unwrap().selected.as_deref(),
             Some(id.as_str())
         );
-        let change = plan_switch(root, &path, &store, Target::Restore, None).unwrap();
+        let change = plan_switch(root, &path, &store, Target::Restore, None, &Default::default()).unwrap();
         transaction::commit(root, Client::Codex, change.deltas, &paths).unwrap();
         let config = Plan::open(&path).unwrap();
         assert_eq!(config.get(None, "model").unwrap(), Some(&json!("gpt-5.2")));
@@ -741,7 +809,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let config = root.join("config.toml");
-        fs::write(&config, "model = 'gpt-5.2'\nmodel_catalog_json = 'user-catalog.json'\nmodel_reasoning_effort = 'high'\n").unwrap();
+        fs::write(&config, "model = 'gpt-5.2'\nmodel_catalog_json = 'user-catalog.json'\nmodel_reasoning_effort = 'high'\n[desktop]\nenabled-reasoning-efforts = ['low']\n").unwrap();
         let save = |model, key| {
             models::save(
                 root,
@@ -759,7 +827,12 @@ mod tests {
         let allowed = [config.clone(), catalog.clone(), models::path(root)];
         let apply = |target| {
             let (_, store) = models::read(root).unwrap();
-            let change = plan_switch(root, &config, &store, target, None).unwrap();
+            let (_, account) = store.model(&primary).unwrap();
+            let catalogs = [(account.id.clone(), [("provider/fixture-b".into(), model_effort::Options {
+                levels: vec![http::EffortLevel::High, http::EffortLevel::Max],
+                default: Some(http::EffortLevel::High),
+            })].into())].into();
+            let change = plan_switch(root, &config, &store, target, None, &catalogs).unwrap();
             transaction::commit(root, Client::Codex, change.deltas, &allowed).unwrap();
         };
         apply(Target::Profile(&primary, Some(Connection::Direct)));
@@ -773,6 +846,16 @@ mod tests {
             plan.get(None, "model_reasoning_effort").unwrap(),
             Some(&json!("high"))
         );
+        assert_eq!(plan.get(Some("desktop"), DESKTOP_EFFORTS).unwrap(), Some(&json!(["high", "max"])));
+        let check_catalog = |catalog: &Value| {
+            assert_eq!(catalog["models"][0]["slug"], "provider/fixture-b");
+            assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
+            let levels = catalog["models"][0]["supported_reasoning_levels"].as_array().unwrap();
+            assert_eq!(levels.iter().map(|level| level["effort"].as_str().unwrap()).collect::<Vec<_>>(), ["high", "max"]);
+            assert_eq!(catalog["models"][1]["slug"], "fixture-a");
+            assert_eq!(catalog["models"][1]["supported_reasoning_levels"], json!([]));
+        };
+        check_catalog(&serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap());
         apply(Target::Official);
         let plan = Plan::open(&config).unwrap();
         assert_eq!(
@@ -783,6 +866,7 @@ mod tests {
             plan.get(None, "model_reasoning_effort").unwrap(),
             Some(&json!("high"))
         );
+        assert_eq!(plan.get(Some("desktop"), DESKTOP_EFFORTS).unwrap(), Some(&json!(["low"])));
         assert_eq!(
             Plan::open(&catalog).unwrap().get(None, "models").unwrap(),
             Some(&json!([]))
@@ -809,8 +893,7 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(catalog["models"][0]["slug"], "provider/fixture-b");
-            assert_eq!(catalog["models"][1]["slug"], "fixture-a");
+            check_catalog(&catalog);
         }
     }
 }

@@ -14,28 +14,43 @@ pub struct ProviderModel {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort_levels: Option<Vec<EffortLevel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<EffortLevel>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
+    None,
+    Minimal,
     Low,
     Medium,
     High,
     XHigh,
     Max,
+    Ultra,
 }
 
 impl EffortLevel {
-    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
+    pub const ALL: [Self; 8] = [
+        Self::None, Self::Minimal, Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max, Self::Ultra,
+    ];
+    pub const STANDARD: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|level| level.as_str() == value)
+    }
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 }
@@ -158,6 +173,7 @@ fn http_error(status: u16) -> String {
 
 fn parse_efforts(item: &Value, openrouter: bool) -> Option<Vec<EffortLevel>> {
     let levels = EffortLevel::ALL;
+    let mandatory = item.pointer("/reasoning/mandatory") == Some(&Value::Bool(true));
     if let Some(effort) = item.pointer("/capabilities/effort") {
         if effort["supported"] == false {
             return Some(Vec::new());
@@ -168,17 +184,17 @@ fn parse_efforts(item: &Value, openrouter: bool) -> Option<Vec<EffortLevel>> {
                 .collect());
         }
     }
-    let supported = if openrouter {
-        let reasoning = item.get("reasoning")?.as_object()?;
-        match reasoning.get("supported_efforts") {
-            Some(Value::Null) => return Some(levels.to_vec()),
-            Some(value) => value.as_array()?,
-            None => return Some(Vec::new()),
-        }
-    } else {
-        item.pointer("/effort/supported_levels")?.as_array()?
+    let supported = match item.pointer("/reasoning/supported_efforts") {
+        // OpenRouter's unrestricted list uses its public gateway ladder.
+        Some(Value::Null) if openrouter => return Some(levels.into_iter()
+            .filter(|&level| level != EffortLevel::Ultra && (!mandatory || level != EffortLevel::None))
+            .collect()),
+        Some(Value::Array(supported)) => supported,
+        _ if openrouter && item.get("reasoning").is_some_and(Value::is_object) => return Some(Vec::new()),
+        _ => item.pointer("/effort/supported_levels")?.as_array()?,
     };
     Some(levels.into_iter()
+        .filter(|&level| !mandatory || level != EffortLevel::None)
         .filter(|level| supported.iter().any(|candidate| candidate == level.as_str()))
         .collect())
 }
@@ -192,9 +208,11 @@ fn parse_catalog(bytes: &[u8], openrouter: bool) -> Result<(Vec<ProviderModel>, 
         let id = item.as_str().or_else(|| item.get("id").and_then(Value::as_str)).unwrap_or("");
         if id.is_empty() || id.len() > 256 || id.chars().any(|ch| ch.is_whitespace() || ch.is_control()) { continue; }
         let name = item.get("display_name").or_else(|| item.get("name")).and_then(Value::as_str).unwrap_or(id).chars().filter(|c| !c.is_control()).take(160).collect();
-        models.insert(id.to_string(), ProviderModel {
-            id: id.into(), name, effort_levels: parse_efforts(item, openrouter),
-        });
+        let effort_levels = parse_efforts(item, openrouter);
+        let default_effort = item.pointer("/reasoning/default_effort").or_else(|| item.pointer("/effort/default_level"))
+            .and_then(Value::as_str).and_then(EffortLevel::parse)
+            .filter(|level| effort_levels.as_ref().is_some_and(|levels| levels.contains(level)));
+        models.insert(id.to_string(), ProviderModel { id: id.into(), name, effort_levels, default_effort });
     }
     let last = value.get("last_id").and_then(Value::as_str).or_else(|| data.last().and_then(|item| item.get("id")).and_then(Value::as_str)).unwrap_or("").to_string();
     Ok((models.into_values().collect(), value.get("has_more").and_then(Value::as_bool).unwrap_or(false) || data.len() > MAX_MODELS, last))
@@ -291,13 +309,14 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_keeps_only_explicit_effort_levels() {
-        use EffortLevel::*;
+        use EffortLevel::{High, Low, Max, XHigh};
         let directory = json!({"data":[
             {"id":"native", "capabilities":{"effort":{"supported":true, "high":{"supported":true}, "max":{"supported":true}, "low":{"supported":false}}}},
             {"id":"disabled", "capabilities":{"effort":{"supported":false, "high":{"supported":true}}}},
             {"id":"toggle-only", "reasoning":{"default_enabled":true}},
             {"id":"unified", "reasoning":{"supported_efforts":["none","xhigh","low","xhigh","no-such-level"]}},
             {"id":"unrestricted", "reasoning":{"supported_efforts":null}},
+            {"id":"mandatory", "reasoning":{"mandatory":true,"supported_efforts":["none","low","high"]}},
             {"id":"undocumented", "supported_parameters":["reasoning"]}
         ]});
         let transport = stub(vec![(200, directory.clone()), (200, directory)]);
@@ -311,8 +330,9 @@ mod tests {
         assert_eq!(router["native"], Some(vec![High, Max]));
         assert_eq!(router["disabled"], Some(Vec::new()));
         assert_eq!(router["toggle-only"], Some(Vec::new()));
-        assert_eq!(router["unified"], Some(vec![Low, XHigh]));
-        assert_eq!(router["unrestricted"], Some(EffortLevel::ALL.to_vec()));
+        assert_eq!(router["unified"], Some(vec![EffortLevel::None, Low, XHigh]));
+        assert_eq!(router["unrestricted"], Some(EffortLevel::ALL[..7].to_vec()));
+        assert_eq!(router["mandatory"], Some(vec![Low, High]));
         assert_eq!(router["undocumented"], None);
         let custom = levels("https://example.invalid/anthropic").await;
         assert_eq!(custom["native"], Some(vec![High, Max]));

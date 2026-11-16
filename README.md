@@ -84,6 +84,20 @@ Claude Desktop、Codex 桌面端和 Codex CLI 已接入 Lite 网关后，在 Lit
 
 Claude Desktop 的[配置](https://claude.com/docs/third-party/claude-desktop/configuration#inferencemodels)只能限制最高档。对于目录中档位不连续的模型，Lite 会将菜单里的额外选项转成最接近的可用档位。只调节思考预算的模型不视为有离散档位。
 
+### 其他客户端的思考强度
+
+重新应用模型档案或模型列表，启动新会话后使用以下入口。Lite 依据供应商目录和实际接口确认模型档位。固定强度、只有思考开关、自动路由和未声明可调档位的模型沿用客户端原设置。
+
+| 客户端 | 选择入口 |
+| --- | --- |
+| Claude Code | 在 Lite 的「新会话思考强度」选档后点「在终端启动」。能由原生滑块完整表达的模型也可用 `/effort`。 |
+| Codex 桌面端与 CLI | 桌面端模型选择器或 CLI 的 `/model`。网关热切后重开客户端可刷新档位菜单。 |
+| OpenCode | 选好模型后切换模型变体，命令行可用 `--variant`。 |
+| Qwen Code | 支持模型档位声明的版本可用 `/effort`。 |
+| WorkBuddy、CodeBuddy Code | 选好模型后在客户端调整思考强度。 |
+| Kimi Code CLI | 在客户端调整 Thinking 强度。 |
+| GitHub Copilot CLI | 在可用的模型选择器中调整，或用 `--reasoning-effort`。 |
+
 ## 配置 MCP
 
 1. 打开「MCP 工具」，选择目标客户端。展开「配置文件」可查看 Lite 会写到哪里。Claude Desktop 会区分官方模式与第三方模型模式。
@@ -114,6 +128,10 @@ CodeNeo Lite 使用 [MIT 许可证](LICENSE)。欢迎为 [MCP 目录](mcp/catalo
 
 费用按模型厂商公开 API 价估算，统一显示整数人民币，有上下限时取中点。美元单价按 2026-11-12 中间价 1 美元兑 6.7174 元人民币折算。DeepSeek 使用公开峰谷价，百炼使用华北 2（北京）公开价。明细提供价格来源、价格核对日期和汇率来源。订阅、套餐、代理、折扣及工具费用请以实际账单为准。
 
+价格表覆盖预置模型，并统一处理已核对的模型别名、供应商前缀和日期后缀。[GLM-5.3 系列](https://docs.bigmodel.cn/cn/guide/start/pricing)按智谱人民币公开价估算；[Qwen4 Max Preview](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)目前仅支持 Token Plan，`qwen4-max-preview` 与账单别名 `qwen4.0-max-preview` 均显示「套餐计费」及官方说明，不虚构按量单价。自动路由或套餐别名未提供实际模型时，显示「实际模型待确认」。未收录的新模型显示「价格待补充」，其 Token 仍纳入总量。
+
+存在未折算记录时，金额显示「已估算小计」及已覆盖的 Token 比例。同一模型部分请求缺少计价依据时，也会保留原因和未折算用量。价格来源与核对日期由后端统一提供，价格表随应用版本更新，不实时抓取官网。开发时运行 `cargo test --locked -p codeneo-lite usage`，其中的覆盖检查要求每个预置模型及角色映射具有计价规则或明确的套餐／动态路由说明；新增模型不能直接落入未知价格。
+
 ## 开发验证
 
 在项目根目录运行以下命令。需要 Rust 1.96、Node.js 20 或更新版本，以及 Tauri 平台依赖。
@@ -132,6 +150,8 @@ npm run test:ui
 若本机已安装 Codex CLI，可用 `CODENEO_TEST_CODEX="$(command -v codex)" cargo test -p codeneo-lite direct_catalog_shows_same_account_models_and_restores_external_catalog` 核对原生模型目录，也可以将测试名换成 `native_codex_continues_a_thread_after_gateway_switch` 并加上 `-- --ignored`，验证同一会话切换上游后的续聊。测试使用临时配置和模拟供应商。
 
 用 `npm run build` 构建当前平台的安装包。应用沿用原有 Lite 的本机数据目录，可继续读取已保存的档案。若 Codex 或 FrameLeap 的连接引用了旧版可执行文件路径，请在新应用里重新应用对应模型或更新 MCP 连接。
+
+macOS 交付前对最终 `.app` 运行 `npm run verify:macos -- /path/to/codeneo-lite.app`，并在 DMG 挂载后再次验证盘内的应用。验证会核对源码、Info.plist 和可执行文件的版本、双架构、代码签名及实际计价逻辑。不要用 `cargo build` 生成的开发可执行文件代替更新 `.app`；用量页的「计价说明」会显示实际运行版本。
 
 `crates/` 包含来自 ClaudeKeeper 的模型配置、目录请求和诊断模块。`src-tauri/src/gateway.rs` 管理 CodeNeo Lite网关的本机监听与启动恢复。
 

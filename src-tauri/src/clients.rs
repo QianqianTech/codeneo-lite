@@ -1,6 +1,7 @@
 use crate::{
-    codex, desktop, desktop_models, files,
+    codex, desktop, desktop_models, files, model_effort,
     gateway::{self, Connection},
+    model_transport::EffortLevel,
     models::{self, Applied, Pending, Store},
     transaction::{self, Client, Delta, Plan},
     vault, workbuddy,
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     path::{Path, PathBuf},
     process::Command,
@@ -232,6 +233,8 @@ pub struct ClientView {
     pub pending: Option<PendingView>,
     pub models: Vec<String>,
     pub code_models: Vec<CodeModelView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub code_efforts: Vec<EffortLevel>,
     pub local_gateway: bool,
 }
 
@@ -260,6 +263,7 @@ impl ClientView {
             pending: None,
             models: Vec::new(),
             code_models: Vec::new(),
+            code_efforts: Vec::new(),
             local_gateway: false,
         }
     }
@@ -445,6 +449,15 @@ fn code_view(root: &Path, store: &Store, path: &Path) -> Result<ClientView, Stri
                     };
                 if credential_matches {
                     view.applied(Client::Code, store, Some(applied));
+                    if view.issue.is_none() {
+                        if let Some(capabilities) = store
+                            .code_capabilities
+                            .as_ref()
+                            .filter(|caps| caps.path == path)
+                        {
+                            view.code_efforts = capabilities.levels.clone();
+                        }
+                    }
                     if view.issue.is_none()
                         && value(&plan, Some("env"), CODE_MODEL_OPTION)? != Some(active)
                     {
@@ -459,6 +472,19 @@ fn code_view(root: &Path, store: &Store, path: &Path) -> Result<ClientView, Stri
         Ok(ClientView::official())
     } else {
         Ok(view)
+    }
+}
+
+pub(crate) fn require_code_effort(
+    root: &Path,
+    path: &Path,
+    effort: EffortLevel,
+) -> Result<(), String> {
+    let (_, store) = models::read(root)?;
+    if code_view(root, &store, path)?.code_efforts.contains(&effort) {
+        Ok(())
+    } else {
+        Err("当前 Claude Code 模型没有这个思考档位。请刷新客户端状态。".into())
     }
 }
 
@@ -686,6 +712,14 @@ struct OfficialCode {
     fields: serde_json::Map<String, Value>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct CodeCapabilities {
+    path: PathBuf,
+    fields: BTreeMap<String, Value>,
+    #[serde(default)]
+    levels: Vec<EffortLevel>,
+}
+
 fn code_official_path(root: &Path) -> PathBuf {
     root.join("official-code.bin")
 }
@@ -738,9 +772,12 @@ fn plan_code(
     path: &Path,
     store: &Store,
     id: Option<&str>,
+    catalogs: &model_effort::Accounts,
 ) -> Result<Vec<Delta>, String> {
     let mut code = Plan::open(path)?;
     let mut desired = serde_json::Map::new();
+    let mut capabilities = BTreeMap::new();
+    let mut levels = Vec::new();
     if let Some(id) = id {
         let (model, account) = store.model(id)?;
         models::require_model(Client::Code, model, account)?;
@@ -765,6 +802,22 @@ fn plan_code(
         desired.insert(other.into(), json!(""));
         desired.insert(CODE_MODEL_OPTION.into(), json!(profile.model));
         desired.insert(CODE_MODEL_OPTION_NAME.into(), json!(model.name));
+        let model_id = crate::model_transport::provider_api_model(&profile.model)?;
+        let options = model_effort::options(account, models::Protocol::Anthropic, &model_id, catalogs);
+        if let Some(options) = options.within(&EffortLevel::STANDARD) {
+            levels = options.levels;
+        }
+        for (field, id) in [
+            ("ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES", &profile.model),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES", &profile.opus_model),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES", &profile.sonnet_model),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES", &profile.haiku_model),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES", &profile.fable_model),
+        ] {
+            if let Some(value) = model_effort::claude_code_capabilities(account, id, catalogs) {
+                capabilities.insert(field.to_owned(), json!(value));
+            }
+        }
         if account.preset == "openrouter" {
             desired.insert(
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".into(),
@@ -790,6 +843,33 @@ fn plan_code(
         }
     }
     let mut state = Plan::open(&models::path(root))?;
+    let previous = store
+        .code_capabilities
+        .as_ref()
+        .filter(|previous| previous.path == path);
+    if let Some(previous) = previous {
+        for (key, managed) in &previous.fields {
+            if !capabilities.contains_key(key) && code.get(Some("env"), key)? == Some(managed) {
+                code.set(Some("env"), key, None)?;
+            }
+        }
+    }
+    let mut owned = BTreeMap::new();
+    for (key, value) in capabilities {
+        let current = code.get(Some("env"), &key)?;
+        if current.is_none() || current == previous.and_then(|previous| previous.fields.get(&key)) {
+            code.set(Some("env"), &key, Some(value.clone()))?;
+            owned.insert(key, value);
+        }
+    }
+    if previous.is_some() || !owned.is_empty() || !levels.is_empty() {
+        let owned = (!owned.is_empty() || !levels.is_empty()).then(|| CodeCapabilities {
+            path: path.to_path_buf(),
+            fields: owned,
+            levels,
+        });
+        state.set(None, "code_capabilities", owned.map(|owned| json!(owned)))?;
+    }
     state.set(
         None,
         "code",
@@ -799,6 +879,13 @@ fn plan_code(
         .into_iter()
         .flatten()
         .collect())
+}
+
+fn code_catalogs(root: &Path, store: &Store, id: Option<&str>) -> model_effort::Accounts {
+    let Some((model, _)) = id.and_then(|id| store.model(id).ok()) else {
+        return Default::default();
+    };
+    tauri::async_runtime::block_on(model_effort::discover(root, Client::Code, store, [model]))
 }
 
 #[derive(Serialize)]
@@ -922,8 +1009,14 @@ fn switch_client(root: &Path, client: Client, id: Option<&str>) -> Result<Outcom
         Client::Desktop => Err("请使用 Desktop 的模型应用入口".into()),
         Client::Code => {
             let path = code_path()?;
-            let deltas = plan_code(root, &path, &store, id)?;
-            if code_running()? {
+            let running = code_running()?;
+            let catalogs = if running {
+                Default::default()
+            } else {
+                code_catalogs(root, &store, id)
+            };
+            let deltas = plan_code(root, &path, &store, id, &catalogs)?;
+            if running || code_running()? {
                 store.pending_code = Some(Pending {
                     id: id.map(str::to_owned),
                     route: selection(&store, Client::Code, id)?.map(|applied| applied.route),
@@ -1042,6 +1135,7 @@ pub fn process_pending(root: &Path) -> Result<Option<Result<String, String>>, St
     let Some(pending) = store.pending_code.as_ref().filter(|p| p.issue.is_none()) else {
         return Ok(None);
     };
+    let catalogs = code_catalogs(root, &store, pending.id.as_deref());
     // A session can start between the optimistic check and taking the lock.
     let running = code_running();
     if running == Ok(true) {
@@ -1055,7 +1149,7 @@ pub fn process_pending(root: &Path) -> Result<Option<Result<String, String>>, St
         if latest_route != pending.route || code_fingerprint(&path)? != pending.config {
             return Err("等待期间模型档案或 Code 配置已改变，请重新应用".into());
         }
-        let deltas = plan_code(root, &path, &store, pending.id.as_deref())?;
+        let deltas = plan_code(root, &path, &store, pending.id.as_deref(), &catalogs)?;
         capture_official(root, &path, &store, pending.id.as_deref())?;
         transaction::commit(root, Client::Code, deltas, &paths)
     })();
@@ -1249,7 +1343,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("lite");
         let code = temp.path().join("settings.json");
-        let original = json!({"env":{"ANTHROPIC_API_KEY":"fixture-official-key","ANTHROPIC_MODEL":"claude-sonnet", "HTTPS_PROXY":"fixture-proxy", (CODE_MODEL_OPTION): "existing-model"}, "hooks":{"keep":[]}});
+        let original = json!({"env":{
+            "ANTHROPIC_API_KEY":"fixture-official-key", "ANTHROPIC_MODEL":"claude-sonnet",
+            "HTTPS_PROXY":"fixture-proxy", (CODE_MODEL_OPTION): "existing-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":"thinking"
+        }, "hooks":{"keep":[]}});
         fs::write(&code, transaction::json_bytes(&original).unwrap()).unwrap();
         let first = save_model(&root, "deepseek-flash", None);
         let account = models::read(&root).unwrap().1.accounts[0].id.clone();
@@ -1259,7 +1357,15 @@ mod tests {
             let (_, store) = models::read(&root).unwrap();
             assert_eq!(store.accounts.len(), 1);
             capture_official(&root, &code, &store, Some(id)).unwrap();
-            let deltas = plan_code(&root, &code, &store, Some(id)).unwrap();
+            let catalogs = if id == &second {
+                use EffortLevel::{High, Low, Max, Medium};
+                [(account.clone(), [("deepseek-v4-pro".into(), model_effort::Options {
+                    levels: vec![Low, Medium, High, Max], default: Some(High),
+                })].into())].into()
+            } else {
+                Default::default()
+            };
+            let deltas = plan_code(&root, &code, &store, Some(id), &catalogs).unwrap();
             transaction::commit(&root, Client::Code, deltas, &paths).unwrap();
             let applied = read(&code);
             assert_eq!(
@@ -1276,12 +1382,23 @@ mod tests {
                 original["env"]["HTTPS_PROXY"]
             );
             assert_eq!(applied["hooks"], original["hooks"]);
+            assert_eq!(applied["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES"], "thinking");
+            let native = &applied["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"];
+            assert!(require_code_effort(&root, &code, EffortLevel::Max).is_ok());
+            if id == &first {
+                assert!(native.is_null());
+                assert!(require_code_effort(&root, &code, EffortLevel::Medium).is_err());
+            } else {
+                assert_eq!(native, "effort,max_effort,thinking,adaptive_thinking");
+                assert!(require_code_effort(&root, &code, EffortLevel::Medium).is_ok());
+            }
         }
         let (_, store) = models::read(&root).unwrap();
-        let deltas = plan_code(&root, &code, &store, None).unwrap();
+        let deltas = plan_code(&root, &code, &store, None, &Default::default()).unwrap();
         transaction::commit(&root, Client::Code, deltas, &paths).unwrap();
         assert_eq!(read(&code), original);
         assert!(models::read(&root).unwrap().1.code.is_none());
+        assert!(models::read(&root).unwrap().1.code_capabilities.is_none());
         assert!(!fs::read_to_string(models::path(&root))
             .unwrap()
             .contains("fixture-supplier-key"));
@@ -1575,7 +1692,7 @@ mod tests {
         })).unwrap();
         let id = models::save(&root, input, Some(Client::Code)).unwrap();
         let (_, store) = models::read(&root).unwrap();
-        let deltas = plan_code(&root, &code, &store, Some(&id)).unwrap();
+        let deltas = plan_code(&root, &code, &store, Some(&id), &Default::default()).unwrap();
         transaction::commit(
             &root,
             Client::Code,

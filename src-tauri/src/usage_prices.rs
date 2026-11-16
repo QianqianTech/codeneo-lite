@@ -1,13 +1,13 @@
 use crate::usage::Tokens;
 use serde::{Deserialize, Serialize};
 
-pub const VERIFIED: &str = "2026-11-13";
+pub const VERIFIED: &str = "2026-11-16";
 pub const EXCHANGE_RATE_DATE: &str = "2026-11-12";
 pub const USD_TO_CNY: f64 = 6.7174;
 pub const EXCHANGE_RATE_SOURCE: &str =
     "https://xinhuanet.com.cn/20261112/97116e6012634afcaefaa35c8e5f9a92/c.html";
 
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Anthropic,
@@ -16,6 +16,139 @@ pub enum Source {
     QwenMax,
     QwenFlash,
     Kimi,
+    Glm,
+    QwenPreview,
+    Qwen37Max,
+    Qwen37Plus,
+    Qwen36Plus,
+    Qwen36Flash,
+    BailianDeepseek41,
+    BailianDeepseekPro,
+    BailianDeepseekFlash,
+    BailianKimi27,
+    BailianKimi26,
+    BailianKimi25,
+    BailianMinimax,
+    BailianGlm,
+    BailianModels,
+    KimiCode,
+}
+
+#[derive(Serialize)]
+pub struct SourceInfo {
+    pub id: Source,
+    pub label: &'static str,
+    pub url: &'static str,
+    pub verified: &'static str,
+}
+
+impl Source {
+    pub fn info(self) -> SourceInfo {
+        use Source::*;
+        let (label, url) = match self {
+            Anthropic => (
+                "Anthropic 官方价",
+                "https://platform.claude.com/docs/en/about-claude/pricing",
+            ),
+            Openai => (
+                "OpenAI 官方价",
+                "https://developers.openai.com/api/docs/pricing",
+            ),
+            Deepseek => (
+                "DeepSeek 峰谷价",
+                "https://api-docs.deepseek.com/quick_start/pricing/",
+            ),
+            QwenMax => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+            ),
+            QwenFlash => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+            ),
+            Kimi => (
+                "Kimi 官方价",
+                "https://www.kimi.com/resources/kimi-k3-1-pro-pricing",
+            ),
+            Glm => (
+                "智谱官方价",
+                "https://docs.bigmodel.cn/cn/guide/start/pricing",
+            ),
+            QwenPreview => (
+                "Token Plan 官方说明",
+                "https://help.aliyun.com/zh/model-studio/qwen4-max-preview",
+            ),
+            Qwen37Max => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/qwen3-7-max",
+            ),
+            Qwen37Plus => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+            ),
+            Qwen36Plus => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/qwen3-6-plus",
+            ),
+            Qwen36Flash => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/qwen3-6-flash",
+            ),
+            BailianDeepseek41 => (
+                "百炼峰谷价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/deepseek-v4-1-flash",
+            ),
+            BailianDeepseekPro => (
+                "百炼峰谷价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/deepseek-v4-pro",
+            ),
+            BailianDeepseekFlash => (
+                "百炼峰谷价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/model-routing",
+            ),
+            BailianKimi27 => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/kimi-k2-7-code",
+            ),
+            BailianKimi26 => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/kimi-k2-6",
+            ),
+            BailianKimi25 => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/kimi-k2-5",
+            ),
+            BailianMinimax => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/minimax-m2-5",
+            ),
+            BailianGlm => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/glm-5-3",
+            ),
+            BailianModels => (
+                "百炼模型说明",
+                "https://help.aliyun.com/zh/model-studio/token-plan-team-overview",
+            ),
+            KimiCode => (
+                "Kimi Code 模型说明",
+                "https://www.kimi.com/code/docs/third-party-tools/claude-code.html",
+            ),
+        };
+        SourceInfo {
+            id: self,
+            label,
+            url,
+            verified: if matches!(
+                self,
+                Anthropic | Openai | Deepseek | QwenMax | QwenFlash | Kimi
+            ) {
+                "2026-11-13"
+            } else {
+                VERIFIED
+            },
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -34,16 +167,7 @@ pub enum Exchange {
 impl Reference {
     pub fn url(self) -> &'static str {
         match self {
-            Self::Rate(Source::Anthropic) => {
-                "https://platform.claude.com/docs/en/about-claude/pricing"
-            }
-            Self::Rate(Source::Openai) => "https://developers.openai.com/api/docs/pricing",
-            Self::Rate(Source::Deepseek) => "https://api-docs.deepseek.com/quick_start/pricing/",
-            Self::Rate(Source::QwenMax) => "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
-            Self::Rate(Source::QwenFlash) => {
-                "https://help.aliyun.com/zh/model-studio/qwen3-8-flash"
-            }
-            Self::Rate(Source::Kimi) => "https://www.kimi.com/resources/kimi-k3-1-pro-pricing",
+            Self::Rate(source) => source.info().url,
             Self::Exchange(_) => EXCHANGE_RATE_SOURCE,
         }
     }
@@ -115,7 +239,73 @@ fn dated_alias(model: &str) -> &str {
     model
 }
 
-#[derive(Clone, Copy, Serialize)]
+// Normalize only known vendor namespaces and documented aliases. In particular,
+// never strip arbitrary router names or map a new/preview model to an older price.
+fn normalized_model(raw: &str) -> String {
+    let raw = raw.trim().to_ascii_lowercase();
+    let raw = raw.strip_suffix("[1m]").unwrap_or(&raw);
+    let raw = match raw.split_once('/') {
+        Some(("anthropic", model)) if model.starts_with("claude-") => model,
+        Some(("openai", model)) if model.starts_with("gpt-") => model,
+        Some(("deepseek", model)) if model.starts_with("deepseek-") => model,
+        Some(("qwen", model)) if model.starts_with("qwen") => model,
+        Some(("z-ai" | "zhipu", model)) if model.starts_with("glm-") => model,
+        Some(("moonshotai" | "kimi", model)) if model.starts_with("kimi-") => model,
+        Some(("minimax", model)) if model.starts_with("minimax-") => model,
+        _ => raw,
+    };
+    let raw = dated_alias(raw);
+    match raw {
+        "qwen4.0-max-preview" => "qwen4-max-preview".into(),
+        // OpenRouter uses dotted Claude versions, while Anthropic uses dashes.
+        model if model.starts_with("claude-") => model.replace('.', "-"),
+        _ => raw.to_owned(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    MissingPrice,
+    PlanOnly,
+    DynamicModel,
+    UnknownProvider,
+    ProviderMismatch,
+    RequestDetailRequired,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct Unpriced {
+    pub reason: Reason,
+    pub source: Option<Source>,
+}
+
+impl Unpriced {
+    pub fn provider_unknown() -> Self {
+        Self {
+            reason: Reason::UnknownProvider,
+            source: None,
+        }
+    }
+}
+
+fn unavailable(model: &str) -> Unpriced {
+    use Reason::*;
+    let (reason, source) = match model {
+        "qwen4-max-preview" => (PlanOnly, Some(Source::QwenPreview)),
+        "auto" => (DynamicModel, Some(Source::BailianModels)),
+        "kimi-for-coding" | "kimi-for-coding-highspeed" => (DynamicModel, Some(Source::KimiCode)),
+        "codex-auto-review"
+        | "~anthropic/claude-sonnet-latest"
+        | "~anthropic/claude-opus-latest"
+        | "~anthropic/claude-fable-latest"
+        | "~anthropic/claude-haiku-latest" => (DynamicModel, None),
+        _ => (MissingPrice, None),
+    };
+    Unpriced { reason, source }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct Estimate {
     pub low_cny: f64,
     pub high_cny: f64,
@@ -128,26 +318,33 @@ pub fn for_provider(
     model: &str,
     tokens: Tokens,
     per_request: bool,
-) -> Option<Estimate> {
+) -> Result<Estimate, Unpriced> {
     use Source::*;
-    let model = model
-        .strip_prefix("anthropic/")
-        .or_else(|| model.strip_prefix("openai/"))
-        .unwrap_or(model);
-    let model = model.strip_suffix("[1m]").unwrap_or(model);
+    let model = normalized_model(model);
+    let model = model.as_str();
+    let mut price = estimate(model, tokens)?;
     let source = match provider {
         "openai" | "api.openai.com" => Openai,
         "anthropic" | "api.anthropic.com" => Anthropic,
         "deepseek" | "api.deepseek.com" => Deepseek,
-        "dashscope.aliyuncs.com" => {
-            if dated_alias(model) == "qwen3.8-max" {
-                QwenMax
-            } else {
-                QwenFlash
+        "glm" | "zhipu" | "bigmodel" | "open.bigmodel.cn" => Glm,
+        "dashscope.aliyuncs.com" => match price.source {
+            QwenMax | QwenFlash | Qwen37Max | Qwen37Plus | Qwen36Plus | Qwen36Flash
+            | BailianDeepseek41 | BailianDeepseekPro | BailianDeepseekFlash | BailianKimi27
+            | BailianKimi26 | BailianKimi25 | BailianMinimax => price.source,
+            Glm if model == "glm-5.3" => {
+                price.source = BailianGlm;
+                BailianGlm
             }
-        }
+            _ => {
+                return Err(Unpriced {
+                    reason: Reason::ProviderMismatch,
+                    source: Some(price.source),
+                })
+            }
+        },
         "moonshot" | "api.moonshot.cn" | "api.moonshot.ai" => Kimi,
-        _ => return None,
+        _ => return Err(Unpriced::provider_unknown()),
     };
     // Session aggregates cannot establish the input size of each request.
     let tiered = source == Openai
@@ -156,7 +353,7 @@ pub fn for_provider(
             "gpt-6-astra"
                 | "gpt-6.1-sol"
                 | "gpt-6.1-terra"
-                | "gpt-6.1-luna"
+                | "gpt-6-luna"
                 | "gpt-6-sol"
                 | "gpt-5.6-sol"
                 | "gpt-5.6-terra"
@@ -164,17 +361,31 @@ pub fn for_provider(
                 | "gpt-5.5"
                 | "gpt-5.4"
         )
-        || source == Anthropic && dated_alias(model) == "claude-haiku-5-5";
+        || source == Anthropic && model == "claude-haiku-5-5"
+        || source == Glm && matches!(model, "glm-5.1" | "glm-5" | "glm-5-turbo")
+        || matches!(source, Qwen37Plus | Qwen36Plus | Qwen36Flash);
     if tiered && !per_request {
-        return None;
+        return Err(Unpriced {
+            reason: Reason::RequestDetailRequired,
+            source: Some(source),
+        });
     }
-    estimate(model, tokens).filter(|price| price.source == source)
+    if price.source != source {
+        return Err(Unpriced {
+            reason: Reason::ProviderMismatch,
+            source: Some(price.source),
+        });
+    }
+    Ok(price)
 }
 
-pub fn estimate(model: &str, tokens: Tokens) -> Option<Estimate> {
-    use Source::{Anthropic, Deepseek, Kimi, Openai, QwenFlash, QwenMax};
-    let model = dated_alias(model.strip_suffix("[1m]").unwrap_or(model));
+pub fn estimate(model: &str, tokens: Tokens) -> Result<Estimate, Unpriced> {
+    use Source::*;
+    let model = normalized_model(model);
+    let model = model.as_str();
     let long = tokens.input_total() > 272_000;
+    let qwen_long = tokens.input_total() > 256_000;
+    let glm_long = tokens.input_total() >= 32_000;
     let (source, rates) = match model {
         "claude-fable-5-2" | "claude-mythos-5-2" => (Anthropic, Rates::claude(8.0, 40.0, 0.20)),
         "claude-fable-5-1" | "claude-mythos-5-1" => (Anthropic, Rates::claude(10.0, 50.0, 0.25)),
@@ -222,16 +433,44 @@ pub fn estimate(model: &str, tokens: Tokens) -> Option<Estimate> {
         "deepseek-v4-pro" => (Deepseek, Rates::new(1.32, 3.96, 0.044, 1.32, 1.32)),
         "qwen3.8-max" => (QwenMax, Rates::new(12.0, 36.0, 1.5, 15.0, 15.0)),
         "qwen3.8-flash" => (QwenFlash, Rates::new(0.80, 2.70, 0.10, 1.25, 1.25)),
-        "k3" | "kimi-k3" => (Kimi, Rates::new(20.0, 100.0, 2.0, 20.0, 40.0)),
+        "qwen3.7-max" => (Qwen37Max, Rates::new(12.0, 36.0, 2.4, 15.0, 15.0)),
+        "qwen3.7-plus" if qwen_long => (Qwen37Plus, Rates::new(6.0, 24.0, 1.2, 7.5, 7.5)),
+        "qwen3.7-plus" => (Qwen37Plus, Rates::new(2.0, 8.0, 0.4, 2.5, 2.5)),
+        "qwen3.6-plus" if qwen_long => (Qwen36Plus, Rates::new(8.0, 48.0, 0.8, 10.0, 10.0)),
+        "qwen3.6-plus" => (Qwen36Plus, Rates::new(2.0, 12.0, 0.2, 2.5, 2.5)),
+        "qwen3.6-flash" if qwen_long => (Qwen36Flash, Rates::new(4.8, 28.8, 0.48, 6.0, 6.0)),
+        "qwen3.6-flash" => (Qwen36Flash, Rates::new(1.2, 7.2, 0.12, 1.5, 1.5)),
+        // GLM uses CNY, with implicit cache creation charged as ordinary input.
+        // Cache storage is currently free; do not apply Anthropic's write multipliers.
+        "glm-5.3" | "glm-5.2" => (Glm, Rates::new(8.0, 28.0, 2.0, 8.0, 8.0)),
+        "glm-5.3-flash" => (Glm, Rates::new(0.8, 2.8, 0.23, 0.8, 0.8)),
+        "glm-5.3-flashx" | "glm-5.3-flashx-legal" => (Glm, Rates::new(2.0, 7.0, 0.57, 2.0, 2.0)),
+        "glm-5.1" if glm_long => (Glm, Rates::new(8.0, 28.0, 2.0, 8.0, 8.0)),
+        "glm-5.1" => (Glm, Rates::new(6.0, 24.0, 1.3, 6.0, 6.0)),
+        "glm-5" if glm_long => (Glm, Rates::new(6.0, 22.0, 1.5, 6.0, 6.0)),
+        "glm-5" => (Glm, Rates::new(4.0, 18.0, 1.0, 4.0, 4.0)),
+        "glm-5-turbo" if glm_long => (Glm, Rates::new(7.0, 26.0, 1.8, 7.0, 7.0)),
+        "glm-5-turbo" => (Glm, Rates::new(5.0, 22.0, 1.2, 5.0, 5.0)),
+        "deepseek-v4.1-flash" | "deepseek-v4.1-flash-1017" => {
+            (BailianDeepseek41, Rates::new(2.0, 8.0, 0.04, 2.0, 2.0))
+        }
+        "deepseek-v4-pro-0813" => (BailianDeepseekPro, Rates::new(9.0, 27.0, 0.9, 9.0, 9.0)),
+        "deepseek-v4-flash-0731" => (BailianDeepseekFlash, Rates::new(3.0, 9.0, 0.3, 3.0, 3.0)),
+        "kimi-k2.7-code" => (BailianKimi27, Rates::new(6.5, 27.0, 1.3, 8.125, 8.125)),
+        "kimi-k2.6" => (BailianKimi26, Rates::new(6.5, 27.0, 1.3, 8.125, 8.125)),
+        "kimi-k2.5" => (BailianKimi25, Rates::new(4.0, 21.0, 0.8, 5.0, 5.0)),
+        "minimax-m2.5" => (BailianMinimax, Rates::new(2.1, 8.4, 0.42, 2.1, 2.1)),
+        "k3" | "kimi-k3" | "k3-256k" => (Kimi, Rates::new(20.0, 100.0, 2.0, 20.0, 40.0)),
         "k3.1-pro" | "kimi-k3.1-pro" => (Kimi, Rates::new(13.0, 68.0, 1.30, 13.0, 26.0)),
         "k3.1-pro-highspeed" | "kimi-k3.1-pro-highspeed" => {
             (Kimi, Rates::new(26.0, 136.0, 1.30, 26.0, 52.0))
         }
-        _ => return None,
+        _ => return Err(unavailable(model)),
     };
     let high = rates.cost(tokens);
     let (low_cny, high_cny) = match source {
         Deepseek => (high * 0.5 * USD_TO_CNY, high * USD_TO_CNY),
+        BailianDeepseek41 | BailianDeepseekPro | BailianDeepseekFlash => (high * 0.5, high),
         QwenMax => (
             Rates {
                 cache_read: 1.0,
@@ -240,12 +479,216 @@ pub fn estimate(model: &str, tokens: Tokens) -> Option<Estimate> {
             .cost(tokens),
             high,
         ),
-        QwenFlash | Kimi => (high, high),
-        _ => (high * USD_TO_CNY, high * USD_TO_CNY),
+        Qwen37Max | Qwen37Plus | BailianKimi27 | BailianKimi26 | BailianKimi25 => (
+            Rates {
+                cache_read: rates.cache_read * 0.5,
+                ..rates
+            }
+            .cost(tokens),
+            high,
+        ),
+        Anthropic | Openai => (high * USD_TO_CNY, high * USD_TO_CNY),
+        _ => (high, high),
     };
-    Some(Estimate {
+    Ok(Estimate {
         low_cny,
         high_cny,
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn glm_prices_include_input_output_and_cache_without_usd_conversion() {
+        let tokens = Tokens {
+            input: 18_540_000,
+            cache_read: 40_510_000,
+            output: 197_000,
+            ..Tokens::default()
+        };
+        let price = estimate("glm-5.3", tokens).unwrap();
+        close(price.low_cny, 234.856);
+        close(price.high_cny, 234.856);
+        assert_eq!(price.source, Source::Glm);
+
+        let write = Tokens {
+            cache_write: 1_000_000,
+            cache_write_long: 1_000_000,
+            ..Tokens::default()
+        };
+        close(estimate("glm-5.3", write).unwrap().high_cny, 16.0);
+        let cached = Tokens {
+            cache_read: 1_000_000,
+            ..Tokens::default()
+        };
+        close(estimate("glm-5.3-flash", cached).unwrap().high_cny, 0.23);
+        close(estimate("glm-5.3-flashx", cached).unwrap().high_cny, 0.57);
+    }
+
+    #[test]
+    fn aliases_share_prices_but_unknown_versions_never_borrow_them() {
+        let tokens = Tokens {
+            input: 1000,
+            ..Tokens::default()
+        };
+        for alias in [
+            "glm-5.3[1m]",
+            "ZHIPU/GLM-5.3",
+            "z-ai/glm-5.3",
+            "GLM-5.3-2026-08-14",
+        ] {
+            close(estimate(alias, tokens).unwrap().high_cny, 0.008);
+        }
+        close(
+            estimate("anthropic/claude-sonnet-5.5", tokens)
+                .unwrap()
+                .high_cny,
+            estimate("claude-sonnet-5-5", tokens).unwrap().high_cny,
+        );
+        for alias in [
+            "qwen4-max-preview",
+            "qwen4.0-max-preview",
+            "QWEN/QWEN4.0-MAX-PREVIEW[1m]",
+        ] {
+            let issue = estimate(alias, tokens).unwrap_err();
+            assert_eq!(issue.reason, Reason::PlanOnly);
+            assert_eq!(issue.source, Some(Source::QwenPreview));
+        }
+        for unknown in [
+            "glm-5.4",
+            "qwen5-max",
+            "qwen4-max",
+            "proxy/glm-5.3",
+            "openai/glm-5.3",
+            "glm-5.3-special",
+        ] {
+            assert_eq!(
+                estimate(unknown, tokens).unwrap_err().reason,
+                Reason::MissingPrice
+            );
+        }
+    }
+
+    #[test]
+    fn official_provider_prices_are_not_applied_to_other_providers() {
+        let tokens = Tokens {
+            input: 1000,
+            ..Tokens::default()
+        };
+        for provider in ["glm", "zhipu", "open.bigmodel.cn"] {
+            close(
+                for_provider(provider, "glm-5.3", tokens, true)
+                    .unwrap()
+                    .high_cny,
+                0.008,
+            );
+        }
+        assert_eq!(
+            for_provider("dashscope.aliyuncs.com", "glm-5.3", tokens, true)
+                .unwrap()
+                .source,
+            Source::BailianGlm
+        );
+        assert_eq!(
+            for_provider("api.z.ai", "glm-5.3", tokens, true)
+                .unwrap_err()
+                .reason,
+            Reason::UnknownProvider
+        );
+        assert_eq!(
+            for_provider("openai", "glm-5.3", tokens, true)
+                .unwrap_err()
+                .reason,
+            Reason::ProviderMismatch
+        );
+        for model in ["gpt-6-luna", "gpt-6.1-sol"] {
+            assert_eq!(
+                for_provider("openai", model, tokens, false)
+                    .unwrap_err()
+                    .reason,
+                Reason::RequestDetailRequired
+            );
+        }
+    }
+
+    #[test]
+    fn tiered_models_use_each_request_input_including_cached_tokens() {
+        let small = Tokens {
+            input: 1,
+            cache_read: 31_998,
+            ..Tokens::default()
+        };
+        let large = Tokens {
+            cache_read: 31_999,
+            ..small
+        };
+        close(
+            estimate("glm-5.1", small).unwrap().high_cny,
+            (6.0 + 31_998.0 * 1.3) / 1e6,
+        );
+        close(
+            estimate("glm-5.1", large).unwrap().high_cny,
+            (8.0 + 31_999.0 * 2.0) / 1e6,
+        );
+        assert_eq!(
+            for_provider("glm", "glm-5.1", large, false)
+                .unwrap_err()
+                .reason,
+            Reason::RequestDetailRequired
+        );
+        let small = Tokens {
+            cache_read: 256_000,
+            ..Tokens::default()
+        };
+        let large = Tokens { input: 1, ..small };
+        close(estimate("qwen3.7-plus", small).unwrap().high_cny, 0.1024);
+        close(estimate("qwen3.7-plus", large).unwrap().high_cny, 0.307206);
+    }
+
+    #[test]
+    fn every_preset_model_has_a_price_or_an_explicit_reviewed_exception() {
+        let presets = serde_json::to_value(crate::models::presets()).unwrap();
+        let mut models = std::collections::BTreeSet::new();
+        for preset in presets.as_array().unwrap() {
+            for model in preset["models"].as_array().unwrap() {
+                models.insert(model.as_str().unwrap().to_owned());
+            }
+        }
+        for preset in claudekeeper_claude::provider_presets() {
+            for model in [
+                preset.model,
+                preset.sonnet_model,
+                preset.opus_model,
+                preset.haiku_model,
+                preset.small_fast_model,
+                preset.subagent_model,
+                preset.reasoning_model,
+                preset.fable_model,
+            ] {
+                if !model.is_empty() {
+                    models.insert(model.to_owned());
+                }
+            }
+        }
+        assert!(models.len() >= 35);
+        for model in models {
+            match estimate(&model, Tokens { input: 1000, ..Tokens::default() }) {
+                Ok(price) => {
+                    assert!(price.low_cny.is_finite() && price.low_cny >= 0.0);
+                    assert!(price.high_cny.is_finite() && price.high_cny >= price.low_cny);
+                    assert!(price.source.info().url.starts_with("https://"));
+                }
+                Err(issue) => assert!(matches!(issue.reason,
+                    Reason::PlanOnly | Reason::DynamicModel),
+                    "预置模型 {model} 缺少计价规则；新增模型时必须核对单价或记录明确的例外：{issue:?}"),
+            }
+        }
+    }
 }

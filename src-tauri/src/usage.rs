@@ -1,13 +1,13 @@
 use crate::{
     clients, codex, desktop,
     transaction::Client,
-    usage_prices::{self, Estimate},
+    usage_prices::{self, Estimate, Unpriced},
 };
 use memchr::memmem::Finder;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -71,6 +71,15 @@ struct Row {
     provider: Option<String>,
     tokens: Tokens,
     estimate: Option<Estimate>,
+    priced_tokens: u64,
+    unpriced: Vec<UnpricedUsage>,
+}
+
+#[derive(Serialize)]
+struct UnpricedUsage {
+    #[serde(flatten)]
+    issue: Unpriced,
+    tokens: u64,
 }
 
 #[derive(Serialize)]
@@ -83,9 +92,11 @@ struct Coverage {
 
 #[derive(Serialize)]
 pub struct Report {
+    app_version: &'static str,
     rows: Vec<Row>,
     coverage: Vec<Coverage>,
     pricing_verified: &'static str,
+    pricing_sources: Vec<usage_prices::SourceInfo>,
     exchange_rate_date: &'static str,
     usd_to_cny: f64,
     exchange_rate_source: &'static str,
@@ -429,7 +440,7 @@ fn add_usage(
     model: &str,
     provider: Option<&str>,
     tokens: Tokens,
-    estimate: Option<Estimate>,
+    estimate: Result<Estimate, Unpriced>,
 ) {
     if tokens.total() == 0 {
         return;
@@ -442,9 +453,12 @@ fn add_usage(
             provider: provider.map(str::to_owned),
             tokens: Tokens::default(),
             estimate: None,
+            priced_tokens: 0,
+            unpriced: Vec::new(),
         });
     row.tokens.add(tokens);
-    if let Some(cost) = estimate {
+    if let Ok(cost) = estimate {
+        row.priced_tokens = row.priced_tokens.saturating_add(tokens.total());
         let total = row.estimate.get_or_insert(Estimate {
             low_cny: 0.0,
             high_cny: 0.0,
@@ -452,6 +466,15 @@ fn add_usage(
         });
         total.low_cny += cost.low_cny;
         total.high_cny += cost.high_cny;
+    } else if let Err(issue) = estimate {
+        if let Some(existing) = row.unpriced.iter_mut().find(|item| item.issue == issue) {
+            existing.tokens = existing.tokens.saturating_add(tokens.total());
+        } else {
+            row.unpriced.push(UnpricedUsage {
+                issue,
+                tokens: tokens.total(),
+            });
+        }
     }
 }
 
@@ -567,10 +590,24 @@ pub fn summarize(
         rows.extend(client_rows.into_values());
     }
     rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.tokens.total()));
+    let pricing_sources = rows
+        .iter()
+        .flat_map(|row| {
+            row.estimate
+                .map(|price| price.source)
+                .into_iter()
+                .chain(row.unpriced.iter().filter_map(|item| item.issue.source))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|source| source.info())
+        .collect();
     Ok(Report {
+        app_version: env!("CARGO_PKG_VERSION"),
         rows,
         coverage,
         pricing_verified: usage_prices::VERIFIED,
+        pricing_sources,
         exchange_rate_date: usage_prices::EXCHANGE_RATE_DATE,
         usd_to_cny: usage_prices::USD_TO_CNY,
         exchange_rate_source: usage_prices::EXCHANGE_RATE_SOURCE,
@@ -581,6 +618,47 @@ pub fn summarize(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn pricing_coverage_preserves_unpriced_usage_even_in_a_partly_priced_row() {
+        let mut rows = BTreeMap::new();
+        let tokens = Tokens {
+            input: 1000,
+            output: 100,
+            ..Tokens::default()
+        };
+        let price = usage_prices::estimate("glm-5.3", tokens);
+        for quote in [
+            price,
+            Err(Unpriced::provider_unknown()),
+            Err(Unpriced::provider_unknown()),
+        ] {
+            add_usage(&mut rows, Client::Desktop, "glm-5.3", None, tokens, quote);
+        }
+        let row = &rows["glm-5.3\n"];
+        assert_eq!(row.tokens.total(), 3300);
+        assert_eq!(row.priced_tokens, 1100);
+        assert_eq!(row.unpriced.len(), 1);
+        assert_eq!(row.unpriced[0].tokens, 2200);
+        assert!((row.estimate.unwrap().high_cny - 0.0108).abs() < 1e-9);
+
+        for model in ["qwen4.0-max-preview", "unreleased-model"] {
+            add(&mut rows, Client::Desktop, model, tokens);
+            let row = &rows[&format!("{model}\n")];
+            assert_eq!(row.tokens.total(), 1100);
+            assert_eq!(row.priced_tokens, 0);
+            assert!(row.estimate.is_none());
+            assert_eq!(row.unpriced[0].tokens, 1100);
+        }
+        assert_eq!(
+            rows["qwen4.0-max-preview\n"].unpriced[0].issue.reason,
+            usage_prices::Reason::PlanOnly
+        );
+        assert_eq!(
+            rows["unreleased-model\n"].unpriced[0].issue.reason,
+            usage_prices::Reason::MissingPrice
+        );
+    }
 
     fn read_test_log(path: &Path, size: u64) -> logs::Parsed<Vec<u8>> {
         let mut usage = Vec::new();

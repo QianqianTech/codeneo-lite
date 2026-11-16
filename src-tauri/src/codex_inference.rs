@@ -1,5 +1,5 @@
 //! A separate, authenticated Responses route on the shared local listener.
-use crate::{model_transport, models, vault};
+use crate::{model_effort, model_transport, models, vault};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +21,8 @@ pub(crate) struct Selection {
     sealed_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<model_effort::Options>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub(crate) struct Route {
     pub model: String,
     pub key: String,
     pub upstream_key: String,
+    pub effort: Option<model_effort::Options>,
 }
 
 impl Selection {
@@ -50,6 +53,7 @@ impl Selection {
             fingerprint: fingerprint.into(),
             sealed_key,
             port: previous.and_then(|selection| selection.port),
+            effort: None,
         })
     }
 
@@ -63,6 +67,10 @@ impl Selection {
 
     pub(crate) fn set_port(&mut self, port: u16) {
         self.port = (port != crate::gateway::DEFAULT_PORT).then_some(port);
+    }
+
+    pub(crate) fn set_effort(&mut self, options: Option<model_effort::Options>) {
+        self.effort = options;
     }
 
     pub(crate) fn route(
@@ -82,6 +90,7 @@ impl Selection {
             model: model_transport::provider_api_model(&model.model)?,
             key: gateway_key(root, self.reference())?,
             upstream_key: models::key(root, account)?,
+            effort: self.effort.clone(),
         }))
     }
 }
@@ -95,6 +104,31 @@ fn gateway_key(root: &Path, reference: &str) -> Result<String, String> {
 }
 
 impl Route {
+    pub(crate) fn prepare_effort(&self, payload: &mut Value) {
+        if self.effort.is_none() && payload["model"].as_str() == Some(self.model.as_str()) {
+            return;
+        }
+        let Some(reasoning) = payload.get_mut("reasoning").and_then(Value::as_object_mut) else {
+            return;
+        };
+        let Some(value) = reasoning.get("effort").and_then(Value::as_str) else {
+            return;
+        };
+        let level = model_transport::EffortLevel::parse(value);
+        let supported = level.and_then(|level| self.effort.as_ref()?.nearest(level));
+        if supported == level && supported.is_some() {
+            return;
+        }
+        if let Some(supported) = supported {
+            reasoning.insert("effort".into(), Value::from(supported.as_str()));
+        } else {
+            reasoning.remove("effort");
+        }
+        if reasoning.is_empty() {
+            payload.as_object_mut().expect("object with reasoning").remove("reasoning");
+        }
+    }
+
     pub(crate) fn authorizes(&self, token: Option<&str>) -> bool {
         token.is_some_and(|token| {
             // Compare HMACs with ring's constant-time verifier.

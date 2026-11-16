@@ -185,15 +185,21 @@
   }
 
   async function removeModel(model, control) {
-    if (removingModels.has(model.id) || !window.confirm(`删除模型库中的「${model.name}」？`)) return;
+    if (removingModels.has(model.id)) return;
+    const confirmed = await lite.confirmAction(`删除「${model.name}」？`, "将从模型库移除此档案。", "确认删除");
+    if (!confirmed) return;
     removingModels.add(model.id);
     control.disabled = true;
+    const feedback = $("models-feedback");
+    message(feedback, "pending", "正在删除档案…");
     try {
       await invoke("remove_model", { id: model.id });
-      message($("models-feedback"), "success", "模型已从模型库删除。");
-      await lite.refresh();
+      lite.data.models = lite.data.models.filter(item => item.id !== model.id);
+      syncFilters();
+      message(feedback, "success", "模型档案已删除。");
+      void lite.refresh();
     } catch (error) {
-      message($("models-feedback"), "error", errorText(error));
+      message(feedback, "error", errorText(error));
     } finally {
       removingModels.delete(model.id);
       renderLibrary();

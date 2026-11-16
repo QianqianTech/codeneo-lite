@@ -140,7 +140,7 @@ pub struct CodeModels {
 }
 
 impl CodeModels {
-    fn values(&self) -> [&String; 7] {
+    pub(crate) fn values(&self) -> [&String; 7] {
         [
             &self.opus,
             &self.sonnet,
@@ -209,6 +209,8 @@ pub struct Store {
     pub models: Vec<Model>,
     pub desktop: Option<Applied>,
     pub code: Option<Applied>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_capabilities: Option<crate::clients::CodeCapabilities>,
     pub codex: Option<Applied>,
     pub codex_original: Option<crate::codex::Original>,
     pub pending_code: Option<Pending>,
