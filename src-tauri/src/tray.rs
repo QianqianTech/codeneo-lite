@@ -246,7 +246,25 @@ pub fn install(app: &App) -> tauri::Result<()> {
                             launch::Action::Open
                         }
                     };
-                    let result = launch::run(client, action).await;
+                    let needs_directory = action == launch::Action::Terminal
+                        && matches!(client, Client::Code | Client::Codex);
+                    let working_dir = if needs_directory {
+                        let mut dialog = rfd::AsyncFileDialog::new().set_title("选择项目目录");
+                        if let Some(window) = app.get_webview_window("main") {
+                            dialog = dialog.set_parent(&window);
+                        }
+                        dialog
+                            .pick_folder()
+                            .await
+                            .map(|handle| handle.path().to_path_buf())
+                    } else {
+                        None
+                    };
+                    let result = if needs_directory && working_dir.is_none() {
+                        Err("未选择项目目录，已取消启动。".to_string())
+                    } else {
+                        launch::run(client, action, working_dir.as_deref()).await
+                    };
                     let error = result.is_err();
                     let message = result.unwrap_or_else(|message| message);
                     if error {

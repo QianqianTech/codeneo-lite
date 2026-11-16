@@ -276,7 +276,7 @@ const lite = (() => {
     const third = !supportsMode || (draft?.mode ?? (thirdPartyActive ? "third_party" : "official")) === "third_party";
     const gatewayRequired = id === "desktop" && profile?.desktop_direct === false;
     const defaultsToGateway = status.local_gateway
-      || (id === "desktop" && profile?.id !== status.selected && profile?.desktop_models?.length);
+      || (id === "desktop" && (!profile || profile.id !== status.selected));
     const route = gatewayRequired ? "gateway" : draft?.connection ?? (defaultsToGateway ? "gateway" : "direct");
     $("model-switch").hidden = target.agent || (!supportsMode && !available.length);
     $("client-mode-field").hidden = !supportsMode;
@@ -353,14 +353,17 @@ const lite = (() => {
       activeLaunch = defaultLaunch(activeClient);
     }
     renderClientList();
-    const target = client();
-    $("client-identity").hidden = !target;
-    $("client-detail").hidden = !target;
-    if (!target) return;
+    const selectedClient = client();
+    $("client-identity").hidden = !selectedClient;
+    $("client-detail").hidden = !selectedClient;
+    if (!selectedClient) return;
+    const codexCli = selectedClient.id === "codex" && activeLaunch === "terminal";
+    const target = codexCli && selectedClient.cli_status
+      ? { ...selectedClient, status: selectedClient.cli_status }
+      : selectedClient;
     const status = target.status;
     const locked = !canApply(target) || running.has(target.id);
     const workbuddy = target.id === "workbuddy";
-    const codexCli = target.id === "codex" && activeLaunch === "terminal";
     const installed = target.id === "codex" ? target.launch?.[activeLaunch] : target.installed;
     $("current-client").textContent = codexCli ? "Codex CLI" : target.name;
     $("client-status").textContent = statusLabel(target, installed);
@@ -404,10 +407,12 @@ const lite = (() => {
     help.textContent = showInstall ? "查看安装说明 ↗" : "打开官方配置指南 ↗";
     $("client-note").textContent = status.local_gateway && target.id === "desktop"
       ? "重新打开 Claude Desktop 可刷新它的模型菜单。"
+      : status.local_gateway && codexCli
+      ? "CLI 使用独立配置接入网关，不会修改桌面应用。请保持 Lite 运行。"
       : status.local_gateway && target.id === "codex"
-      ? "Codex 桌面端与 CLI 共用网关档案。当前转发的模型在 Lite 中查看。"
-      : codexCli ? "与 Codex 桌面端共用用户配置。应用后启动新会话，在 /model 中选择模型。"
-      : target.id === "codex" ? "与 Codex CLI 共用用户配置。完全退出并重新打开桌面应用后生效。"
+      ? "桌面应用使用自己的网关配置。完全退出并重新打开后生效。"
+      : codexCli ? "模型写在 Codex CLI 的独立配置里，不会改桌面应用。启动新会话后，在 /model 中选择模型。"
+      : target.id === "codex" ? "这里只改 Codex 桌面应用。完全退出并重新打开后生效。"
       : target.id === "desktop" && !target.launch?.restart
       ? "应用后，完全退出并重新打开 Claude Desktop。"
       : target.note || clientNotes[target.id] || "";
@@ -497,11 +502,18 @@ const lite = (() => {
     if (action === "restart" && !(await confirmRestart(target.name))) return;
     const { id } = target;
     const codeEffort = id === "code" && action === "terminal" ? $("code-effort").value : "";
+    const args = { client: id, action };
+    if (action === "terminal" && (id === "code" || id === "codex")) {
+      const cwd = await pickTerminalDirectory(target);
+      if (!cwd) return;
+      args.cwd = cwd;
+    }
+    if (codeEffort) args.codeEffort = codeEffort;
     running.add(id);
     launchMessages.set(id, { kind: "pending", text: action === "restart" ? "正在重启客户端…" : "正在打开客户端…" });
     renderClients();
     try {
-      const result = await invoke("launch_client", codeEffort ? { client: id, action, codeEffort } : { client: id, action });
+      const result = await invoke("launch_client", args);
       launchMessages.set(id, { kind: "success", text: result });
       const configured = clientMessages.get(id);
       if (configured) configured.actionable = false;
@@ -511,6 +523,16 @@ const lite = (() => {
     } finally {
       running.delete(id);
       renderClients();
+    }
+  }
+
+  async function pickTerminalDirectory(target) {
+    try {
+      return await invoke("pick_terminal_directory");
+    } catch (error) {
+      launchMessages.set(target.id, { kind: "error", text: errorText(error) });
+      renderClients();
+      return null;
     }
   }
 
@@ -589,8 +611,15 @@ const lite = (() => {
     if (third && !id) return;
     const connection = third && gatewayClients.has(target.id) ? $("client-connection").value : null;
     if (action === "restart" && !(await confirmRestart(target.name))) return;
+    const args = modes ? { id, connection, action } : { id };
+    if (target.id === "codex") args.surface = activeLaunch === "terminal" ? "cli" : "desktop";
+    if (action === "terminal" && target.id === "codex") {
+      const cwd = await pickTerminalDirectory(target);
+      if (!cwd) return;
+      args.cwd = cwd;
+    }
     void clientAction(target.id, modes ? "switch_model_mode" : "apply_model",
-      modes ? { id, connection, action } : { id });
+      args);
   }
 
   async function inspectSavedModel(check) {
@@ -705,7 +734,10 @@ const lite = (() => {
       publish("new-model", { target: activeClient, accountId: profile.account, modelId, candidates: catalog, opener: event.currentTarget });
     }
   });
-  $("restore-model").addEventListener("click", () => clientAction(activeClient, "apply_model", { id: null }));
+    $("restore-model").addEventListener("click", () => clientAction(activeClient, "apply_model", {
+      id: null,
+      surface: activeClient === "codex" && activeLaunch === "terminal" ? "cli" : "desktop",
+    }));
   $("undo-model").addEventListener("click", () => clientAction(activeClient, "undo_model"));
   $("cancel-switch").addEventListener("click", () => clientAction(activeClient, "cancel_code_switch"));
   $("recover-desktop-session").addEventListener("click", () => {

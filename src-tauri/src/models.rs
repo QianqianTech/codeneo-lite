@@ -213,6 +213,8 @@ pub struct Store {
     pub code_capabilities: Option<crate::clients::CodeCapabilities>,
     pub codex: Option<Applied>,
     pub codex_original: Option<crate::codex::Original>,
+    pub codex_cli: Option<Applied>,
+    pub codex_cli_original: Option<crate::codex::Original>,
     pub pending_code: Option<Pending>,
     pub agents: std::collections::BTreeMap<Client, crate::agents::Selection>,
 }
@@ -250,7 +252,7 @@ impl Store {
     }
 
     pub fn in_use(&self) -> impl Iterator<Item = &str> {
-        [&self.desktop, &self.code, &self.codex]
+        [&self.desktop, &self.code, &self.codex, &self.codex_cli]
             .into_iter()
             .flatten()
             .map(|applied| applied.id.as_str())

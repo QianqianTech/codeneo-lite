@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::{
     collections::BTreeMap,
-    env, io,
+    env, fs, io,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{LazyLock, Mutex},
@@ -123,14 +123,19 @@ fn agent_controls(
     }
 }
 
-pub async fn run(client: Client, action: Action) -> Result<String, String> {
-    run_with_effort(client, action, None).await
+pub async fn run(
+    client: Client,
+    action: Action,
+    working_dir: Option<&Path>,
+) -> Result<String, String> {
+    run_with_effort(client, action, None, working_dir).await
 }
 
 pub async fn run_with_effort(
     client: Client,
     action: Action,
     effort: Option<EffortLevel>,
+    working_dir: Option<&Path>,
 ) -> Result<String, String> {
     if effort.is_some() && (client, action) != (Client::Code, Action::Terminal) {
         return Err("此启动方式没有 Claude Code 思考档位。".into());
@@ -141,7 +146,7 @@ pub async fn run_with_effort(
             desktop::run(&home, Some(action), None).await
         }
         (Client::Code | Client::Codex, Action::Terminal) => {
-            open_terminal(client, &home, effort).await
+            open_terminal(client, &home, effort, working_dir).await
         }
         (_, Action::Terminal) if agents::is_added(client) => {
             open_agent_terminal(client, &home).await
@@ -156,7 +161,7 @@ pub async fn run_with_effort(
                 app.open().await?;
                 Ok(format!("已请求打开 {}。", client.name()))
             } else if client == Client::Codex {
-                open_terminal(client, &home, None).await
+                open_terminal(client, &home, None, None).await
             } else {
                 Err("未找到可启动的 WorkBuddy，请先安装。".into())
             }
@@ -445,7 +450,27 @@ fn clean_claude_env(command: &mut Command) {
     }
 }
 
-async fn open_terminal(client: Client, home: &Path, effort: Option<EffortLevel>) -> Result<String, String> {
+pub(crate) fn working_directory(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.trim().is_empty() {
+        return Err("请选择项目目录。".into());
+    }
+    let path = PathBuf::from(value);
+    let metadata = fs::metadata(&path).map_err(|_| "所选项目目录无法访问。")?;
+    if !metadata.is_dir() {
+        return Err("所选项目位置必须是目录。".into());
+    }
+    Ok(Some(path))
+}
+
+async fn open_terminal(
+    client: Client,
+    home: &Path,
+    effort: Option<EffortLevel>,
+    working_dir: Option<&Path>,
+) -> Result<String, String> {
     let binary = find_cli(client, home)
         .ok_or_else(|| format!("未找到 {} 命令，请先安装。", client.name()))?;
     let (config_name, config_dir) = if client == Client::Code {
@@ -467,7 +492,19 @@ async fn open_terminal(client: Client, home: &Path, effort: Option<EffortLevel>)
     if let Some(effort) = effort {
         clients::require_code_effort(&root, &config_dir.join("settings.json"), effort)?;
     }
-    terminal(client, home, &binary, Some((config_name, &config_dir)), effort).await?;
+    let profile = (client == Client::Codex)
+        .then(codex::cli_launch_profile)
+        .flatten();
+    terminal(
+        client,
+        home,
+        &binary,
+        Some((config_name, &config_dir)),
+        effort,
+        working_dir,
+        profile,
+    )
+    .await?;
     Ok(format!("已请求在终端启动 {}。", client.name()))
 }
 
@@ -477,7 +514,7 @@ async fn open_agent_terminal(client: Client, home: &Path) -> Result<String, Stri
     agents::ensure_compatible(client)?;
     let root = secrets::root()?;
     let _lock = clients::lock_for_launch(&root, client)?;
-    terminal(client, home, &binary, None, None).await?;
+    terminal(client, home, &binary, None, None, None, None).await?;
     Ok(format!("已请求在终端启动 {}。", client.name()))
 }
 
@@ -525,10 +562,16 @@ fn shell_script(
     config_name: &str,
     config_dir: &Path,
     effort: Option<EffortLevel>,
+    working_dir: Option<&Path>,
+    profile: Option<&str>,
 ) -> Result<String, String> {
     let binary = quote(binary.as_os_str())?;
     let config_dir = quote(config_dir.as_os_str())?;
     let home = quote(home.as_os_str())?;
+    let working_dir = match working_dir {
+        Some(dir) => quote(dir.as_os_str())?,
+        None => home,
+    };
     let mut script = String::new();
     if client == Client::Code {
         script.push_str(&format!(
@@ -546,8 +589,14 @@ fn shell_script(
         }
     }
     script.push_str(&format!(
-        "cd {home} && export {config_name}={config_dir} && exec {binary}"
+        "cd {working_dir} && export {config_name}={config_dir} && exec {binary}"
     ));
+    if let Some(profile) = profile {
+        if !profile.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err("Codex CLI 配置名称无效".into());
+        }
+        script.push_str(&format!(" --profile {profile}"));
+    }
     if let Some(effort) = effort {
         script.push_str(&format!(" --effort {}", effort.as_str()));
     }
@@ -561,10 +610,14 @@ async fn terminal(
     binary: &Path,
     config: Option<(&str, &Path)>,
     effort: Option<EffortLevel>,
+    working_dir: Option<&Path>,
+    profile: Option<&str>,
 ) -> Result<(), String> {
     let path = quote(&terminal_path(home, binary)?)?;
     let script = match config {
-        Some((name, dir)) => shell_script(client, home, binary, name, dir, effort)?,
+        Some((name, dir)) => {
+            shell_script(client, home, binary, name, dir, effort, working_dir, profile)?
+        }
         None => agent_script(client, home, binary)?,
     };
     unix_terminal(&path, &script).await
@@ -625,12 +678,23 @@ async fn terminal(
     binary: &Path,
     config: Option<(&str, &Path)>,
     effort: Option<EffortLevel>,
+    working_dir: Option<&Path>,
+    profile: Option<&str>,
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_CONSOLE: u32 = 0x00000010;
     let mut command = Command::new("cmd.exe");
     command.creation_flags(CREATE_NEW_CONSOLE);
-    let arguments = effort.map_or(String::new(), |effort| format!(" --effort {}", effort.as_str()));
+    let mut arguments = String::new();
+    if let Some(profile) = profile {
+        if !profile.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err("Codex CLI 配置名称无效".into());
+        }
+        arguments.push_str(&format!(" --profile {profile}"));
+    }
+    if let Some(effort) = effort {
+        arguments.push_str(&format!(" --effort {}", effort.as_str()));
+    }
     command.raw_arg(format!(r#"/D /V:OFF /S /K ""%CODENEO_LITE_CLI%"{arguments}""#));
     if client == Client::Code {
         clean_claude_env(&mut command);
@@ -639,7 +703,7 @@ async fn terminal(
     // expansion and AutoRun are disabled, so punctuation in the path stays literal.
     command
         .env("CODENEO_LITE_CLI", binary)
-        .current_dir(home)
+        .current_dir(working_dir.unwrap_or(home))
         .env("PATH", terminal_path(home, binary)?);
     if let Some((name, dir)) = config {
         command.env(name, dir);
@@ -746,9 +810,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("claude's binary $(exit 2)");
         let profile = temp.path().join("Profile with spaces");
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
         fs::write(
             &bin,
-            b"#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' \"$CLAUDE_CONFIG_DIR\" \"${ANTHROPIC_MODEL-unset}\" \"$*\"",
+            b"#!/bin/sh\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$CLAUDE_CONFIG_DIR\" \"${ANTHROPIC_MODEL-unset}\" \"$*\" \"$PWD\"",
         )
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
@@ -759,6 +825,8 @@ mod tests {
             "CLAUDE_CONFIG_DIR",
             &profile,
             Some(EffortLevel::Max),
+            Some(&project),
+            None,
         )
         .unwrap();
         let output = Command::new("/bin/sh")
@@ -770,7 +838,19 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            format!("{}\nunset\n--effort max\n", profile.display())
+            format!("{}\nunset\n--effort max\n{}\n", profile.display(), project.display())
         );
+    }
+
+    #[test]
+    fn terminal_working_directory_rejects_invalid_selections() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("file"), "").unwrap();
+        assert_eq!(working_directory(None).unwrap(), None);
+        assert_eq!(working_directory(Some(temp.path().to_str().unwrap())).unwrap(), Some(temp.path().to_path_buf()));
+        assert!(working_directory(Some("")).is_err());
+        assert!(working_directory(Some("   ")).is_err());
+        assert!(working_directory(Some(temp.path().join("missing").to_str().unwrap())).is_err());
+        assert!(working_directory(Some(temp.path().join("file").to_str().unwrap())).is_err());
     }
 }

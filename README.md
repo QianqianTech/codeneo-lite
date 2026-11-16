@@ -37,7 +37,7 @@ Claude Desktop、Codex 等第三方客户端，以及模型 API、Coding Plan �
 
 - **Claude Desktop** 使用 ClaudeKeeper 的本机应用启动方式。首次接入网关或切换连接方式时，点击「应用并重启」。已接入网关时可用「应用模式」热切模型。
 - **Claude Code** 在系统终端启动。若有模型正在等待切换，退出旧会话，等配置应用后再打开新会话。
-- **Codex** 和 **Codex CLI** 有各自的启动入口，共用 Codex 用户配置。使用自定义 `CODEX_HOME` 时，CLI 读取对应目录下的配置。
+- **Codex** 和 **Codex CLI** 有各自的启动入口。桌面应用读写 `~/.codex/config.toml`。CLI 的模型配置写在 `~/.codex/codeneo-lite.config.toml`，由 Lite 用 `--profile codeneo-lite` 启动，不会改桌面应用的配置。使用自定义 `CODEX_HOME` 时，两份文件都在该目录下。
 - **WorkBuddy** 可以打开检测到的本机应用。添加模型后，在 WorkBuddy 的对话中选择它。
 - **OpenCode、Qwen Code、CodeBuddy Code、Kimi Code 和 Copilot CLI** 在客户端页可提前配置。显示「未检测到」时，可在详情中查看安装说明。检测到兼容版本后可以从 Lite 或托盘启动。应用模型列表后，原客户端启动时会读取配置。
 
@@ -45,7 +45,7 @@ Claude Desktop、Codex 等第三方客户端，以及模型 API、Coding Plan �
 
 在「客户端」选择 Claude Desktop、Claude Code 或 Codex，再找到「模型切换」。可切回官方模式，也可为每个客户端单独选择第三方档案。选中档案后可直接「拉取模型」或「验证供应商」。验证会发送一条简短的模型请求。
 
-Codex 和适合直连的 Claude Desktop 档案可以选择「直连兼容接口」或「CodeNeo Lite网关」。直连由客户端访问服务商，网关由 Lite 在本机转发。使用网关时请保持 Lite 运行。Claude Desktop 使用 Anthropic Messages，Codex 使用 OpenAI Responses。
+Claude Desktop 选择新的第三方档案时默认使用「CodeNeo Lite网关」，兼容的档案也可以手动选择「直连兼容接口」。Codex 同样支持这两种连接方式。直连由客户端访问服务商，网关由 Lite 在本机转发。使用网关时请保持 Lite 运行。Claude Desktop 使用 Anthropic Messages，Codex 使用 OpenAI Responses。
 
 1. 在「模型库」点击「添加模型」，或在「客户端」选择应用后点击「配置新模型」。已接入的服务商也可直接点击「拉取模型」。
 2. 选择服务商，填写一次 API Key。已接入的账号可以直接复用已保存的 Key。
@@ -56,7 +56,8 @@ Codex 和适合直连的 Claude Desktop 档案可以选择「直连兼容接口�
 | --- | --- | --- | --- |
 | Claude Desktop | Anthropic Messages | 网关内热切，初次接入或更改连接方式时重开 | 本地命令、FrameLeap 快捷接入 |
 | Claude Code | Anthropic Messages | 现有会话退出后自动应用，重新运行 `claude` 后用 `/model` 查看 | Streamable HTTP、SSE、本地命令 |
-| Codex 桌面端与 CLI | OpenAI Responses | 网关内热切，直连需重开后从原生列表选择 | Streamable HTTP、本地命令 |
+| Codex 桌面端 | OpenAI Responses | 网关内热切，直连需完全退出并重新打开桌面应用 | Streamable HTTP、本地命令 |
+| Codex CLI | OpenAI Responses | 独立配置。网关内热切，直连需启动新会话后用 `/model` 查看 | Streamable HTTP、本地命令 |
 | WorkBuddy | Chat Completions | 在 WorkBuddy 的对话模型菜单中选择已添加的模型 | Streamable HTTP、SSE、本地命令 |
 | OpenCode 1.17.18–1.x | Chat Completions、Responses、Anthropic Messages | 运行 `opencode`，使用 `/models` | Streamable HTTP、本地命令 |
 | Qwen Code 0.27.3–0.x | Chat Completions、Responses | 运行 `qwen`，使用 `/model` | Streamable HTTP、SSE、本地命令 |
@@ -101,7 +102,8 @@ Claude Desktop 的[配置](https://claude.com/docs/third-party/claude-desktop/co
 | 客户端 | 选择入口 |
 | --- | --- |
 | Claude Code | 在 Lite 的「新会话思考强度」选档后点「在终端启动」。能由原生滑块完整表达的模型也可用 `/effort`。 |
-| Codex 桌面端与 CLI | 桌面端模型选择器或 CLI 的 `/model`。网关热切后重开客户端可刷新档位菜单。 |
+| Codex 桌面端 | 桌面端模型选择器。网关热切后完全退出并重新打开可刷新档位菜单。 |
+| Codex CLI | `/model`。模型配置与桌面端分开，不改桌面应用的档位菜单。 |
 | OpenCode | 选好模型后切换模型变体，命令行可用 `--variant`。 |
 | Qwen Code | 支持模型档位声明的版本可用 `/effort`。 |
 | WorkBuddy、CodeBuddy Code | 选好模型后在客户端调整思考强度。 |

@@ -87,10 +87,17 @@ async fn lite_overview(app: tauri::AppHandle) -> Result<serde_json::Value, Strin
             }
         }
         if let Some(codex) = clients.iter_mut().find(|entry| entry["id"] == "codex") {
+            let root = secrets::root()?;
             if codex["status"]["local_gateway"] == true {
-                match codex::gateway_status(&secrets::root()?).await {
+                match codex::gateway_status(&root, codex::Surface::Desktop).await {
                     Ok(()) => codex["status"]["gateway_ready"] = true.into(),
                     Err(error) => append_issue(&mut codex["status"], error),
+                }
+            }
+            if codex["cli_status"]["local_gateway"] == true {
+                match codex::gateway_status(&root, codex::Surface::Cli).await {
+                    Ok(()) => codex["cli_status"]["gateway_ready"] = true.into(),
+                    Err(error) => append_issue(&mut codex["cli_status"], error),
                 }
             }
         }
@@ -129,8 +136,19 @@ async fn launch_client(
     client: Client,
     action: launch::Action,
     code_effort: Option<model_transport::EffortLevel>,
+    cwd: Option<String>,
 ) -> Result<String, String> {
-    launch::run_with_effort(client, action, code_effort).await
+    let working_dir = launch::working_directory(cwd.as_deref())?;
+    launch::run_with_effort(client, action, code_effort, working_dir.as_deref()).await
+}
+
+fn codex_surface(surface: Option<&str>, action: Option<launch::Action>) -> codex::Surface {
+    if surface == Some("cli") || (surface != Some("desktop") && action == Some(launch::Action::Terminal))
+    {
+        codex::Surface::Cli
+    } else {
+        codex::Surface::Desktop
+    }
 }
 
 #[tauri::command]
@@ -140,6 +158,8 @@ async fn switch_model_mode(
     id: Option<String>,
     connection: Option<gateway::Connection>,
     action: Option<launch::Action>,
+    cwd: Option<String>,
+    surface: Option<String>,
 ) -> Result<String, String> {
     if id.is_none() && connection.is_some() {
         return Err("请选择第三方档案后再设置连接方式。".into());
@@ -153,9 +173,11 @@ async fn switch_model_mode(
             let target = id.as_deref().map_or(codex::Target::Official, |id| {
                 codex::Target::Profile(id, connection)
             });
-            let outcome = codex::switch(&root, target).await?;
+            let surface = codex_surface(surface.as_deref(), action);
+            let outcome = codex::switch(&root, target, surface).await?;
             if let Some(action) = action {
-                match launch::run(client, action).await {
+                let working_dir = launch::working_directory(cwd.as_deref())?;
+                match launch::run(client, action, working_dir.as_deref()).await {
                     Ok(message) => Ok(format!("Codex 配置已写入。{message}")),
                     Err(error) => Err(format!("Codex 配置已写入。{error}")),
                 }
@@ -379,6 +401,19 @@ async fn pick_mcp_directory(window: tauri::WebviewWindow) -> Result<Option<Strin
 }
 
 #[tauri::command]
+async fn pick_terminal_directory(window: tauri::WebviewWindow) -> Result<Option<String>, String> {
+    let Some(handle) = rfd::AsyncFileDialog::new()
+        .set_title("选择项目目录")
+        .set_parent(&window)
+        .pick_folder()
+        .await
+    else {
+        return Ok(None);
+    };
+    Ok(Some(handle.path().to_str().ok_or("项目目录路径编码无效")?.into()))
+}
+
+#[tauri::command]
 async fn token_usage(app: tauri::AppHandle, days: u8) -> Result<usage::Report, String> {
     work(move || {
         let home = agents::home()?;
@@ -424,8 +459,10 @@ async fn apply_model(
     app: tauri::AppHandle,
     client: Client,
     id: Option<String>,
+    surface: Option<String>,
 ) -> Result<clients::Outcome, String> {
-    let result = clients::switch(client, id).await?;
+    let surface = codex_surface(surface.as_deref(), None);
+    let result = clients::switch_on(client, id, surface).await?;
     tray::refresh(&app);
     Ok(result)
 }
@@ -587,6 +624,7 @@ fn main() {
             lite_overview,
             launch_client,
             switch_model_mode,
+            pick_terminal_directory,
             saved_model_catalog,
             verify_saved_model,
             recover_desktop_model_session,
