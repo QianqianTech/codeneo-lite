@@ -135,7 +135,7 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             auth: AuthMode::AuthToken,
             model: "auto",
             sonnet_model: "qwen3.8-flash",
-            opus_model: "qwen4-max-preview",
+            opus_model: "qwen4-max",
             haiku_model: "qwen3.6-flash",
             small_fast_model: "",
             subagent_model: "auto",
@@ -144,7 +144,7 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             effort_level: "",
             auto_compact_window: "",
             max_context_tokens: "983616",
-            verified_on: "2026-11-12",
+            verified_on: "2026-11-17",
         },
     ]
 }
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(qwen.model, "auto");
         assert_eq!(qwen.haiku_model, "qwen3.6-flash");
         assert_eq!(qwen.sonnet_model, "qwen3.8-flash");
-        assert_eq!(qwen.opus_model, "qwen4-max-preview");
+        assert_eq!(qwen.opus_model, "qwen4-max");
         assert_eq!(qwen.subagent_model, "auto");
         assert_eq!(qwen.max_context_tokens, "983616");
 
@@ -286,7 +286,7 @@ mod tests {
             let verified = match preset.id {
                 "openrouter" => "2026-10-27",
                 "kimi" | "kimi-pro" | "glm" => "2026-11-11",
-                "qwen" => "2026-11-12",
+                "qwen" => "2026-11-17",
                 _ => VERIFIED_ON,
             };
             assert_eq!(preset.verified_on, verified);

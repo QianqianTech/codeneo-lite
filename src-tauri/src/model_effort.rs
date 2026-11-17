@@ -86,6 +86,15 @@ pub(crate) fn is_openrouter(account: &Account, protocol: Protocol) -> bool {
     })
 }
 
+pub(crate) fn is_qwen4_responses(endpoint: &Url, model: &str) -> bool {
+    model == models::QWEN4_MAX
+        && matches!(
+            endpoint.path().trim_end_matches('/'),
+            "/compatible-mode/v1" | "/compatible-mode/v1/responses"
+        )
+        && http::is_model_studio(endpoint)
+}
+
 pub(crate) fn adaptive_anthropic(account: &Account, model: &str) -> bool {
     let Ok(base) = http::provider_base(account.base_for(Protocol::Anthropic)) else {
         return false;
@@ -199,7 +208,8 @@ fn known(base: &Url, protocol: Protocol, raw_model: &str) -> Option<Options> {
             ("api.kimi.com" | "api.kimi.ai", "kimi-for-coding") => Some(Max),
             ("api.kimi.com" | "api.kimi.ai", _) => Some(High),
             ("open.bigmodel.cn" | "api.z.ai", _) => Some(Max),
-            (_, _) if desktop_effort::model_studio_host(base) => levels.last().copied(),
+            (_, models::QWEN4_MAX) if http::is_model_studio(base) => Some(High),
+            (_, _) if http::is_model_studio(base) => levels.last().copied(),
             _ => None,
         };
         return Some(Options::known(levels, default));
@@ -256,7 +266,8 @@ fn known(base: &Url, protocol: Protocol, raw_model: &str) -> Option<Options> {
         ("openrouter.ai", "/api", "z-ai/glm-5.3" | "z-ai/glm-5.3-prime") => {
             option(&[Low, High, Max], Max)
         }
-        (_, "/compatible-mode", id) if desktop_effort::model_studio_host(base) => match id {
+        (_, "/compatible-mode", id) if http::is_model_studio(base) => match id {
+            models::QWEN4_MAX => option(&[Low, High, XHigh], High),
             "qwen4-max-preview" | "qwen4.0-max-preview" if models::is_aliyun_token_plan(base) => {
                 option(&[Low, Medium, XHigh], XHigh)
             }
@@ -339,7 +350,7 @@ pub(crate) async fn discover<'a>(
                 let protocol = account.protocol_for(client);
                 let base = http::provider_base(&endpoint(&account, protocol)).ok()?;
                 let host = base.host_str()?;
-                if (protocol == Protocol::Anthropic && desktop_effort::model_studio_host(&base))
+                if (protocol == Protocol::Anthropic && http::is_model_studio(&base))
                     || (host != "openrouter.ai"
                         && names
                             .iter()
@@ -410,6 +421,16 @@ mod tests {
 
     #[test]
     fn fallback_levels_follow_the_provider_and_protocol() {
+        for (protocol, url) in [
+            (Protocol::Anthropic, "https://dashscope.aliyuncs.com/apps/anthropic"),
+            (Protocol::Responses, "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"),
+            (Protocol::ChatCompletions, "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        ] {
+            let base = http::provider_base(url).unwrap();
+            let official = known(&base, protocol, models::QWEN4_MAX).unwrap();
+            assert_eq!(official.levels, [Low, High, XHigh]);
+            assert_eq!(official.default, Some(High));
+        }
         let qwen = http::provider_base(
             "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         )

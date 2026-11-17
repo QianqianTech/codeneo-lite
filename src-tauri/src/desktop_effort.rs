@@ -21,6 +21,7 @@ enum Mapping {
     HighMax,
     LowMediumHighMax,
     LowMediumXhigh,
+    LowHighXhigh,
     Catalog([bool; EffortLevel::ALL.len()]),
 }
 
@@ -35,11 +36,11 @@ impl Effort {
         }
     }
 
-    fn qwen() -> Self {
+    fn qwen(mapping: Mapping) -> Self {
         Self {
             behaves_as: "claude-sonnet-5",
             ceiling: Some("xhigh"),
-            mapping: Mapping::LowMediumXhigh,
+            mapping,
         }
     }
 
@@ -96,6 +97,8 @@ impl Effort {
             (Mapping::HighMax, "low") => "high",
             (Mapping::HighMax | Mapping::LowMediumHighMax, "xhigh") => "max",
             (Mapping::LowMediumXhigh, "high" | "max") => "xhigh",
+            (Mapping::LowHighXhigh, "medium") => "high",
+            (Mapping::LowHighXhigh, "max") => "xhigh",
             (Mapping::Catalog(available), value) => {
                 let Some(level) = EffortLevel::parse(value)
                     .filter(|level| EffortLevel::STANDARD.contains(level))
@@ -152,17 +155,8 @@ fn claude_model(model: &str) -> Option<&'static str> {
     .find(|name| *name == undated)
 }
 
-pub(crate) fn model_studio_host(base: &Url) -> bool {
-    base.host_str().is_some_and(|host| {
-            matches!(
-                host,
-                "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com"
-            ) || host.ends_with(".maas.aliyuncs.com")
-        })
-}
-
 fn model_studio(base: &Url) -> bool {
-    base.path().trim_end_matches('/') == "/apps/anthropic" && model_studio_host(base)
+    base.path().trim_end_matches('/') == "/apps/anthropic" && model_transport::is_model_studio(base)
 }
 
 pub(crate) fn known_levels(base: &Url, model: &str) -> Option<&'static [EffortLevel]> {
@@ -173,6 +167,7 @@ pub(crate) fn known_levels(base: &Url, model: &str) -> Option<&'static [EffortLe
         Mapping::HighMax => &[High, Max],
         Mapping::LowMediumHighMax => &[Low, Medium, High, Max],
         Mapping::LowMediumXhigh => &[Low, Medium, XHigh],
+        Mapping::LowHighXhigh => &[Low, High, XHigh],
         Mapping::Native => match effort.behaves_as {
             "claude-opus-4-5" => &[Low, Medium, High],
             "claude-opus-4-6" | SONNET_46 => &[Low, Medium, High, Max],
@@ -204,13 +199,14 @@ fn support(base: &Url, model: &str) -> Option<Effort> {
     // Model IDs can be identical on services with different effort parameters.
     if model_studio(base) {
         return match model.as_str() {
+            crate::models::QWEN4_MAX => Some(Effort::qwen(Mapping::LowHighXhigh)),
             "qwen4-max-preview" | "qwen4.0-max-preview"
                 if crate::models::is_aliyun_token_plan(base) =>
             {
-                Some(Effort::qwen())
+                Some(Effort::qwen(Mapping::LowMediumXhigh))
             }
             "qwen3.8-max" | "qwen3.8-max-0902" | "qwen3.8-max-2026-09-02" | "qwen3.8-flash" => {
-                Some(Effort::qwen())
+                Some(Effort::qwen(Mapping::LowMediumXhigh))
             }
             "glm-5.3" => Some(three()),
             "glm-5.2" | "deepseek-v4-pro" => Some(two()),
@@ -315,6 +311,18 @@ mod tests {
     #[test]
     fn uses_the_actual_endpoint_and_model_when_choosing_effort_levels() {
         for (base, model, ceiling, levels) in [
+            (
+                TOKEN_PLAN,
+                "qwen4-max",
+                "xhigh",
+                ["low", "high", "high", "xhigh", "xhigh"],
+            ),
+            (
+                "https://dashscope.aliyuncs.com/apps/anthropic",
+                "qwen4-max",
+                "xhigh",
+                ["low", "high", "high", "xhigh", "xhigh"],
+            ),
             (
                 TOKEN_PLAN,
                 "qwen4-max-preview",

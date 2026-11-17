@@ -1,7 +1,7 @@
-use crate::usage::Tokens;
+use crate::{models::QWEN4_MAX, usage::Tokens};
 use serde::{Deserialize, Serialize};
 
-pub const VERIFIED: &str = "2026-11-16";
+pub const VERIFIED: &str = "2026-11-17";
 pub const EXCHANGE_RATE_DATE: &str = "2026-11-12";
 pub const USD_TO_CNY: f64 = 6.7174;
 pub const EXCHANGE_RATE_SOURCE: &str =
@@ -13,11 +13,13 @@ pub enum Source {
     Anthropic,
     Openai,
     Deepseek,
+    Qwen4Max,
     QwenMax,
     QwenFlash,
     Kimi,
     Glm,
     QwenPreview,
+    QwenTokenPlan,
     Qwen37Max,
     Qwen37Plus,
     Qwen36Plus,
@@ -58,6 +60,10 @@ impl Source {
                 "DeepSeek 峰谷价",
                 "https://api-docs.deepseek.com/quick_start/pricing/",
             ),
+            Qwen4Max => (
+                "百炼官方价 · 北京",
+                "https://help.aliyun.com/zh/model-studio/model-pricing",
+            ),
             QwenMax => (
                 "百炼官方价 · 北京",
                 "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
@@ -77,6 +83,10 @@ impl Source {
             QwenPreview => (
                 "Token Plan 官方说明",
                 "https://help.aliyun.com/zh/model-studio/qwen4-max-preview",
+            ),
+            QwenTokenPlan => (
+                "Token Plan 官方说明",
+                "https://help.aliyun.com/zh/model-studio/token-plan-usage-quota",
             ),
             Qwen37Max => (
                 "百炼官方价 · 北京",
@@ -139,13 +149,10 @@ impl Source {
             id: self,
             label,
             url,
-            verified: if matches!(
-                self,
-                Anthropic | Openai | Deepseek | QwenMax | QwenFlash | Kimi
-            ) {
-                "2026-11-13"
-            } else {
-                VERIFIED
+            verified: match self {
+                Anthropic | Openai | Deepseek | QwenMax | QwenFlash | Kimi => "2026-11-13",
+                Qwen4Max | QwenTokenPlan => VERIFIED,
+                _ => "2026-11-16",
             },
         }
     }
@@ -268,6 +275,7 @@ fn normalized_model(raw: &str) -> String {
 pub enum Reason {
     MissingPrice,
     PlanOnly,
+    Subscription,
     DynamicModel,
     UnknownProvider,
     ProviderMismatch,
@@ -329,7 +337,7 @@ pub fn for_provider(
         "deepseek" | "api.deepseek.com" => Deepseek,
         "glm" | "zhipu" | "bigmodel" | "open.bigmodel.cn" => Glm,
         "dashscope.aliyuncs.com" => match price.source {
-            QwenMax | QwenFlash | Qwen37Max | Qwen37Plus | Qwen36Plus | Qwen36Flash
+            Qwen4Max | QwenMax | QwenFlash | Qwen37Max | Qwen37Plus | Qwen36Plus | Qwen36Flash
             | BailianDeepseek41 | BailianDeepseekPro | BailianDeepseekFlash | BailianKimi27
             | BailianKimi26 | BailianKimi25 | BailianMinimax => price.source,
             Glm if model == "glm-5.3" => {
@@ -343,6 +351,13 @@ pub fn for_provider(
                 })
             }
         },
+        "token-plan.cn-beijing.maas.aliyuncs.com" if model == QWEN4_MAX => {
+            return Err(Unpriced {
+                reason: Reason::Subscription,
+                source: Some(QwenTokenPlan),
+            });
+        }
+        host if model == QWEN4_MAX && host.ends_with(".cn-beijing.maas.aliyuncs.com") => Qwen4Max,
         "moonshot" | "api.moonshot.cn" | "api.moonshot.ai" => Kimi,
         _ => return Err(Unpriced::provider_unknown()),
     };
@@ -431,6 +446,7 @@ pub fn estimate(model: &str, tokens: Tokens) -> Result<Estimate, Unpriced> {
             (Deepseek, Rates::new(0.30, 1.20, 0.006, 0.30, 0.30))
         }
         "deepseek-v4-pro" => (Deepseek, Rates::new(1.32, 3.96, 0.044, 1.32, 1.32)),
+        QWEN4_MAX => (Qwen4Max, Rates::new(10.0, 30.0, 0.5, 12.5, 20.0)),
         "qwen3.8-max" => (QwenMax, Rates::new(12.0, 36.0, 1.5, 15.0, 15.0)),
         "qwen3.8-flash" => (QwenFlash, Rates::new(0.80, 2.70, 0.10, 1.25, 1.25)),
         "qwen3.7-max" => (Qwen37Max, Rates::new(12.0, 36.0, 2.4, 15.0, 15.0)),
@@ -533,6 +549,31 @@ mod tests {
     }
 
     #[test]
+    fn qwen4_uses_the_beijing_rate_for_each_token_category() {
+        let n = 1_000_000;
+        for (tokens, rate) in [
+            (Tokens { input: n, ..Tokens::default() }, 10.0),
+            (Tokens { output: n, ..Tokens::default() }, 30.0),
+            (Tokens { cache_read: n, ..Tokens::default() }, 0.5),
+            (Tokens { cache_write: n, ..Tokens::default() }, 12.5),
+            (Tokens { cache_write_long: n, ..Tokens::default() }, 20.0),
+        ] {
+            let price = estimate("QWEN/QWEN4-MAX[1m]", tokens).unwrap();
+            close(price.low_cny, rate);
+            close(price.high_cny, rate);
+            assert_eq!(price.source, Source::Qwen4Max);
+        }
+        let tokens = Tokens { input: 1000, ..Tokens::default() };
+        for host in ["dashscope.aliyuncs.com", "workspace.cn-beijing.maas.aliyuncs.com"] {
+            close(for_provider(host, QWEN4_MAX, tokens, false).unwrap().high_cny, 0.01);
+        }
+        let plan = for_provider("token-plan.cn-beijing.maas.aliyuncs.com", QWEN4_MAX, tokens, true)
+            .unwrap_err();
+        assert_eq!(plan.reason, Reason::Subscription);
+        assert_eq!(plan.source, Some(Source::QwenTokenPlan));
+    }
+
+    #[test]
     fn aliases_share_prices_but_unknown_versions_never_borrow_them() {
         let tokens = Tokens {
             input: 1000,
@@ -564,7 +605,7 @@ mod tests {
         for unknown in [
             "glm-5.4",
             "qwen5-max",
-            "qwen4-max",
+            "qwen4-max-experimental",
             "proxy/glm-5.3",
             "openai/glm-5.3",
             "glm-5.3-special",

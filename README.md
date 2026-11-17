@@ -67,6 +67,8 @@ Claude Desktop 选择新的第三方档案时默认使用「CodeNeo Lite网关�
 
 模型配置写入用户级设置。项目配置、环境变量及启动参数可以覆盖相应的用户默认值。WorkBuddy 需先初始化其本机配置。
 
+在「模型库」选择「通义千问」可用 Token Plan 专属 Key 添加 `qwen4-max`。使用百炼通用 Key 时，选择「百炼按量 API（北京）」添加同一个模型。百炼提供 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口。[Qwen4-Max 接入文档](https://help.aliyun.com/zh/model-studio/qwen4-max)
+
 ### 一个档案使用多个模型
 
 - **Claude Desktop** 在客户端页点击「配置可选模型」，从服务商目录勾选模型，或在「手动添加模型 ID」里每行输入一个 ID。在已选列表中可移除模型或点击「设为默认」，一次保存到当前档案。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。重开 Claude Desktop 可以刷新它的模型菜单。旧会话若提示接续授权，可刷新 Lite 中的 Desktop 状态后，点击「恢复与撤销 → 接续旧会话」。
@@ -86,6 +88,7 @@ Claude Desktop、Codex 桌面端和 Codex CLI 已接入 Lite 网关后，在 Lit
 
 | 接入接口与模型 | 可区分的档位 | Claude Desktop 菜单中的对应关系 |
 | --- | --- | --- |
+| 百炼 Qwen4-Max | Low、High、Extra | Medium 归到 High，最高档 Extra 对应 `xhigh`。[模型文档](https://help.aliyun.com/zh/model-studio/qwen4-max) |
 | [百炼 Token Plan Qwen4 Max Preview](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)、[百炼 Qwen3.8 Max / Flash](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | Low、Medium、Extra | High 和 Extra 都进入 `xhigh`；最高档为 Extra |
 | [百炼 GLM-5.3](https://help.aliyun.com/zh/model-studio/anthropic-api-messages)、[智谱 GLM-5.3 / Flash](https://docs.bigmodel.cn/cn/coding-plan/latest-model)、[Kimi Code K3.1 Pro / K3 / K2.8 Preview](https://www.kimi.com/code/docs/third-party-tools/claude-code.html)、[DeepSeek 官方 Flash / V4 Pro](https://api-docs.deepseek.com/guides/thinking_mode/) | Low、High、Max | Medium 归到 High |
 | [百炼 GLM-5.2、DeepSeek V4 Pro](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | High、Max | Low、Medium 归到 High |
@@ -140,7 +143,9 @@ FrameLeap 位于「MCP 工具 → 热门 MCP」首位，展开后会选中 Claud
 
 费用按模型厂商公开 API 价估算，统一显示整数人民币，有上下限时取中点。美元单价按 2026-11-12 中间价 1 美元兑 6.7174 元人民币折算。DeepSeek 使用公开峰谷价，百炼使用华北 2（北京）公开价。明细提供价格来源、价格核对日期和汇率来源。订阅、套餐、代理、折扣及工具费用请以实际账单为准。
 
-价格表覆盖预置模型，并统一处理已核对的模型别名、供应商前缀和日期后缀。[GLM-5.3 系列](https://docs.bigmodel.cn/cn/guide/start/pricing)按智谱人民币公开价估算；[Qwen4 Max Preview](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)目前仅支持 Token Plan，`qwen4-max-preview` 与账单别名 `qwen4.0-max-preview` 均显示「套餐计费」及官方说明，不虚构按量单价。自动路由或套餐别名未提供实际模型时，显示「实际模型待确认」。未收录的新模型显示「价格待补充」，其 Token 仍纳入总量。
+价格表覆盖预置模型，并统一处理已核对的模型别名、供应商前缀和日期后缀。Qwen4-Max 的北京按量价为每百万 Token 输入 10 元、输出 30 元、缓存命中 0.50 元、创建 5 分钟缓存 12.50 元、创建 1 小时缓存 20 元。明确来自 Token Plan 的记录显示「套餐计费」。预览版的两个模型 ID `qwen4-max-preview` 和 `qwen4.0-max-preview` 同样显示「套餐计费」。[百炼价目表](https://help.aliyun.com/zh/model-studio/model-pricing) [Token Plan 计量规则](https://help.aliyun.com/zh/model-studio/token-plan-usage-quota) [预览版说明](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)
+
+GLM-5.3 系列按智谱人民币公开价估算。自动路由或套餐别名未提供实际模型时，显示「实际模型待确认」。未收录的新模型显示「价格待补充」，其 Token 仍纳入总量。[智谱价目表](https://docs.bigmodel.cn/cn/guide/start/pricing)
 
 存在未折算记录时，金额显示「已估算小计」及已覆盖的 Token 比例。同一模型部分请求缺少计价依据时，也会保留原因和未折算用量。价格来源与核对日期由后端统一提供，价格表随应用版本更新，不实时抓取官网。开发时运行 `cargo test --locked -p codeneo-lite usage`，其中的覆盖检查要求每个预置模型及角色映射具有计价规则或明确的套餐／动态路由说明；新增模型不能直接落入未知价格。
 

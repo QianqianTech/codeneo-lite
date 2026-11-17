@@ -31,5 +31,7 @@ if report.get("qwen4_aliases") != "plan_only" or report.get("unknown_model") != 
     raise SystemExit(f"计价状态验证失败：{report}")
 if abs(report.get("glm_5_3_cny", -1) - 0.0146) > 1e-10:
     raise SystemExit(f"GLM 计价验证失败：{report}")
+if abs(report.get("qwen4_max_cny", -1) - 0.0185) > 1e-10:
+    raise SystemExit(f"Qwen4-Max 计价验证失败：{report}")
 report.update(app=str(app), architectures=architectures, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
 print(json.dumps(report, ensure_ascii=False, indent=2))

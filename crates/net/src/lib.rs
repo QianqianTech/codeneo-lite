@@ -4,7 +4,7 @@ mod provider_models;
 mod redact;
 
 pub use provider_models::{
-    fetch_provider_catalog, fetch_provider_catalog_from_urls, is_kimi_code_endpoint,
+    fetch_provider_catalog, fetch_provider_catalog_from_urls, is_kimi_code_endpoint, is_model_studio,
     kimi_code_concurrency_message, provider_api_model, provider_base, verify_provider_model,
     EffortLevel, ProviderCatalog, ProviderModel, ProviderModelCheck, ProviderReply, ProviderTransport,
     ReqwestProviderModels,

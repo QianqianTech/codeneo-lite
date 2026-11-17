@@ -89,7 +89,16 @@ impl ReqwestProviderModels {
 
 impl ProviderTransport for ReqwestProviderModels {
     async fn request(&self, url: &str, header: (&str, &str), body: Option<Value>) -> Result<ProviderReply, String> {
-        let mut request = if let Some(body) = body { self.client.post(url).json(&body) } else { self.client.get(url) };
+        let mut request = if let Some(body) = body {
+            let request = self.client.post(url).json(&body);
+            if body["stream"] == true {
+                request.header("accept", "text/event-stream")
+            } else {
+                request
+            }
+        } else {
+            self.client.get(url)
+        };
         request = request.header(header.0, header.1).header("anthropic-version", "2023-06-01");
         let mut response = request.send().await.map_err(|e| if e.is_timeout() { "连接超时，请检查网络后重试" } else { "无法连接模型接口，请检查地址、TLS 证书与代理" }.to_string())?;
         let status = response.status().as_u16();
@@ -114,6 +123,14 @@ pub fn provider_base(raw: &str) -> Result<Url, String> {
     }
     url.set_path(&path);
     Ok(url)
+}
+
+pub fn is_model_studio(base: &Url) -> bool {
+    base.scheme() == "https"
+        && base.host_str().is_some_and(|host| {
+            matches!(host, "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com")
+                || host.ends_with(".maas.aliyuncs.com")
+        })
 }
 
 pub fn provider_catalog_urls(base: &Url) -> Vec<String> {
@@ -266,6 +283,9 @@ pub async fn verify_provider_model<T: ProviderTransport + Sync>(transport: &T, b
     let mut endpoint = base.clone(); endpoint.set_path(&format!("{}/v1/messages", base.path().trim_end_matches('/')));
     let mut body = json!({ "model": model, "max_tokens": 32, "stream": false, "messages": [{ "role": "user", "content": "Reply with OK only." }] });
     if model == "kimi-k2.7-code" { body["thinking"] = json!({"type":"enabled","budget_tokens":1024}); body["max_tokens"] = json!(1056); }
+    if model == "qwen4-max" && base.path() == "/apps/anthropic" && is_model_studio(base) {
+        body["thinking"] = json!({"type": "disabled"});
+    }
     let start = Instant::now();
     let result = match transport.request(endpoint.as_str(), header, Some(body)).await {
         Err(err) => Err(err),
@@ -352,19 +372,21 @@ mod tests {
         let base = provider_base("https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1/").unwrap();
         let header = ("Authorization", "Bearer test-key");
         let client = stub(vec![
-            (200, json!({"object":"list","data":[{"id":"qwen3.8-flash","object":"model"}]})),
-            (200, json!({"type":"message","role":"assistant","model":"qwen3.8-flash","content":[{"type":"text","text":"OK"}]})),
+            (200, json!({"object":"list","data":[{"id":"qwen4-max","object":"model"}]})),
+            (200, json!({"type":"message","role":"assistant","model":"qwen4-max","content":[{"type":"text","text":"OK"}]})),
         ]);
 
         let catalog = fetch_provider_catalog(&client, &base, header).await.unwrap();
-        assert_eq!(catalog.models[0].id, "qwen3.8-flash");
+        assert_eq!(catalog.models[0].id, "qwen4-max");
         assert!(!catalog.partial);
         assert!(verify_provider_model(&client, &base, header, &catalog.models[0].id).await.unwrap().healthy);
 
         let calls = client.calls.lock().unwrap();
         assert_eq!(calls[0], ("https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models".into(), None));
         assert_eq!(calls[1].0, "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1/messages");
-        assert_eq!(calls[1].1.as_ref().unwrap()["model"], "qwen3.8-flash");
+        let body = calls[1].1.as_ref().unwrap();
+        assert_eq!(body["model"], "qwen4-max");
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
     }
 
     #[tokio::test]

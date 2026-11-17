@@ -93,6 +93,7 @@ impl Account {
                 preset_by_id("qwen").map(|preset| preset.base_url)
             }
             ("qwen", Protocol::ChatCompletions | Protocol::Responses) => Some(QWEN_OPENAI_BASE),
+            ("bailian", Protocol::ChatCompletions | Protocol::Responses) => Some(BAILIAN_OPENAI_BASE),
             _ => None,
         };
         base.unwrap_or(&self.base_url)
@@ -316,6 +317,9 @@ fn validate_key_for_provider(account: &Account, key: &str) -> Result<(), String>
     if token_plan && !key.strip_prefix("sk-sp-").is_some_and(|tail| !tail.is_empty()) {
         return Err("千问 Token Plan 地址需要套餐专属 API Key（以 sk-sp- 开头）。请在模型库更新该接入账号的 Key，再重新应用档案。".into());
     }
+    if account.preset == "bailian" && key.starts_with("sk-sp-") {
+        return Err("请填写百炼控制台的按量 API Key。使用套餐专属 Key 时，请选择通义千问 Token Plan。".into());
+    }
     Ok(())
 }
 
@@ -391,7 +395,7 @@ pub fn presets() -> Vec<Preset> {
         .iter()
         .map(|preset| preset.id)
         .filter(|id| *id != "kimi-pro")
-        .chain(["openai", "custom"])
+        .chain(["bailian", "openai", "custom"])
         .filter_map(preset)
         .collect()
 }
@@ -405,6 +409,8 @@ const OPENAI_PROTOCOLS: &[Protocol] = &[Protocol::Responses, Protocol::ChatCompl
 const DEEPSEEK_OPENAI_BASE: &str = "https://api.deepseek.com";
 const KIMI_OPENAI_BASE: &str = "https://api.kimi.com/coding/v1";
 const QWEN_OPENAI_BASE: &str = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
+const BAILIAN_OPENAI_BASE: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+pub(crate) const QWEN4_MAX: &str = "qwen4-max";
 
 fn preset_protocols(id: &str) -> Option<&'static [Protocol]> {
     match id {
@@ -414,7 +420,7 @@ fn preset_protocols(id: &str) -> Option<&'static [Protocol]> {
 }
 
 fn provider_supports_same_key(id: &str) -> bool {
-    matches!(provider_id(id), "deepseek" | "kimi" | "qwen" | "openrouter")
+    matches!(provider_id(id), "deepseek" | "kimi" | "qwen" | "openrouter" | "bailian")
 }
 
 pub fn provider_id(preset: &str) -> &str {
@@ -446,6 +452,12 @@ fn preset(id: &str) -> Option<Preset> {
             QWEN_OPENAI_BASE,
             AuthMode::AuthToken,
         ),
+        "bailian" => (
+            "bailian",
+            "百炼按量 API（北京）",
+            "https://dashscope.aliyuncs.com/apps/anthropic",
+            AuthMode::AuthToken,
+        ),
         "custom" => ("custom", "自定义兼容接口", "", AuthMode::AuthToken),
         id => {
             let p = preset_by_id(id)?;
@@ -454,6 +466,7 @@ fn preset(id: &str) -> Option<Preset> {
     };
     let provider = provider_id(id);
     let models: &[&str] = match id {
+        "bailian" => &[QWEN4_MAX],
         "glm" => &["glm-5.3", "glm-5.3-flash"],
         _ => match provider {
             "deepseek" => &["deepseek-flash", "deepseek-v4-pro"],
@@ -468,7 +481,7 @@ fn preset(id: &str) -> Option<Preset> {
             // Text models documented for Token Plan. Availability varies by subscription.
             // https://help.aliyun.com/zh/model-studio/token-plan-team-overview
             "qwen" => &[
-                "qwen4-max-preview",
+                QWEN4_MAX,
                 "qwen3.8-max",
                 "qwen3.8-flash",
                 "qwen3.7-max",
@@ -965,7 +978,7 @@ async fn fetch_catalog(
     client: Option<Client>,
 ) -> Result<http::ProviderCatalog, String> {
     let protocol = client.map_or(account.protocol, |client| account.protocol_for(client));
-    let catalog_protocol = if provider_id(&account.preset) == "kimi" {
+    let catalog_protocol = if matches!(provider_id(&account.preset), "kimi" | "bailian") {
         Protocol::ChatCompletions
     } else {
         protocol
@@ -1057,6 +1070,11 @@ async fn test_openai(
     use serde_json::json;
     let model = api_id(model);
     let responses = protocol == Protocol::Responses;
+    let qwen4 = model == QWEN4_MAX
+        && http::provider_base(account.base_for(protocol)).is_ok_and(|base| {
+            base.path() == "/compatible-mode" && http::is_model_studio(&base)
+        });
+    let stream = responses && qwen4;
     let prompt = "Reply with OK only.";
     let (route, mut body) = if responses {
         (
@@ -1070,12 +1088,19 @@ async fn test_openai(
         )
     };
     if !responses {
-        let limit = if account.preset == "openai" {
+        let limit = if qwen4 || account.preset == "openai" {
             "max_completion_tokens"
         } else {
             "max_tokens"
         };
         body[limit] = json!(32);
+        if qwen4 {
+            body["enable_thinking"] = json!(false);
+        }
+    } else if stream {
+        // Token Plan can time out on non-streaming Responses requests.
+        body["stream"] = json!(true);
+        body["reasoning"] = json!({"effort": "none"});
     }
     let start = Instant::now();
     let result = transport
@@ -1087,7 +1112,13 @@ async fn test_openai(
         .await;
     let status = match result {
         Ok(reply) if (200..300).contains(&reply.status) => {
-            let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap_or_else(|_| {
+                if stream {
+                    responses_probe_completion(&reply.body).unwrap_or_default()
+                } else {
+                    serde_json::Value::Null
+                }
+            });
             let content = if responses {
                 body["output"].as_array()
             } else {
@@ -1117,6 +1148,17 @@ async fn test_openai(
         message: status.unwrap_or_else(|error| error),
         latency_ms: start.elapsed().as_millis() as u64,
     }
+}
+
+fn responses_probe_completion(bytes: &[u8]) -> Option<serde_json::Value> {
+    crate::remote::Sse::default()
+        .push(bytes)
+        .ok()?
+        .into_iter()
+        .filter_map(|event| event.json().ok())
+        .find_map(|mut event| {
+            (event["type"] == "response.completed").then(|| event["response"].take())
+        })
 }
 
 pub fn desktop_profile(model: &Model, account: &Account) -> Profile {
@@ -1151,6 +1193,14 @@ pub fn code_profile(model: &Model, account: &Account) -> Profile {
     profile.small_fast_model = slot(&model.code_models.fast);
     profile.subagent_model = slot(&model.code_models.subagent);
     profile.reasoning_model = resolved_code_model(&model.code_models.reasoning, account);
+    if api_id(&profile.model) == QWEN4_MAX
+        && http::provider_base(&profile.base_url).is_ok_and(|base| {
+            base.path() == "/apps/anthropic" && http::is_model_studio(&base)
+        })
+    {
+        // Qwen4-Max accepts up to 983,616 input tokens with thinking enabled.
+        profile.max_context_tokens = "983616".into();
+    }
     profile
 }
 
@@ -1234,6 +1284,69 @@ mod tests {
         let mut other = input("custom", None, "different-model", "sk-generic-key");
         other.base_url = "https://custom.example/apps/anthropic".into();
         assert!(save(root, other, None).is_ok());
+    }
+
+    #[test]
+    fn qwen4_presets_use_the_correct_account_and_protocol() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::default();
+        for (id, key, domain) in [
+            ("qwen", "sk-sp-test", "token-plan.cn-beijing.maas.aliyuncs.com"),
+            ("bailian", "sk-test", "dashscope.aliyuncs.com"),
+        ] {
+            assert_eq!(preset(id).unwrap().models[0], QWEN4_MAX);
+            let draft_input = input(id, None, QWEN4_MAX, key);
+            let (account, _) = draft(temp.path(), &store, &draft_input).unwrap();
+            assert_eq!(
+                account.base_for(account.protocol_for(Client::Desktop)),
+                format!("https://{domain}/apps/anthropic")
+            );
+            assert_eq!(
+                openai_endpoint(&account, account.protocol_for(Client::Codex), "/responses"),
+                format!("https://{domain}/compatible-mode/v1/responses")
+            );
+            assert_eq!(
+                openai_endpoint(&account, account.protocol_for(Client::Qwen), "/chat/completions"),
+                format!("https://{domain}/compatible-mode/v1/chat/completions")
+            );
+        }
+        assert!(draft(temp.path(), &store, &input("bailian", None, QWEN4_MAX, "sk-sp-test")).is_err());
+    }
+
+    #[tokio::test]
+    async fn qwen4_responses_check_uses_the_completed_stream_event() {
+        struct ResponsesStub;
+        impl http::ProviderTransport for ResponsesStub {
+            async fn request(
+                &self,
+                url: &str,
+                _: (&str, &str),
+                body: Option<serde_json::Value>,
+            ) -> Result<http::ProviderReply, String> {
+                assert_eq!(url, format!("{QWEN_OPENAI_BASE}/responses"));
+                let body = body.unwrap();
+                assert_eq!(body["model"], QWEN4_MAX);
+                assert_eq!(body["stream"], true);
+                assert_eq!(body["reasoning"]["effort"], "none");
+                Ok(http::ProviderReply {
+                    status: 200,
+                    body: concat!(
+                        "id:1\nevent:response.created\ndata:{\"type\":\"response.created\",\"response\":{}}\n\n",
+                        "id:2\nevent:response.completed\n:HTTP_STATUS/200\n",
+                        "data:{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}]}}\n\n",
+                    ).as_bytes().to_vec(),
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (account, secret) = draft(
+            temp.path(),
+            &Store::default(),
+            &input("qwen", None, QWEN4_MAX, "sk-sp-test"),
+        ).unwrap();
+        let (name, value) = header(account.auth_for(Protocol::Responses), &secret);
+        let check = test_openai(&ResponsesStub, &account, (name, &value), QWEN4_MAX, Protocol::Responses).await;
+        assert!(check.healthy);
     }
 
     #[test]
@@ -1371,6 +1484,11 @@ mod tests {
                 "qwen",
                 Some(Client::Codex),
                 "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models",
+            ),
+            (
+                "bailian",
+                Some(Client::Desktop),
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
             ),
             (
                 "openrouter",

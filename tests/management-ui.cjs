@@ -360,10 +360,11 @@ async function main() {
               estimate: { low_cny: 11.8879, high_cny: 13.3996, source: 'qwen_max' } },
           ];
           return {
-            app_version: '0.1.8', pricing_verified: '2026-11-16',
+            app_version: '0.1.8', pricing_verified: '2026-11-17',
             pricing_sources: [
               { id: 'openai', label: 'OpenAI 官方价', url: 'https://developers.openai.com/api/docs/pricing', verified: '2026-11-13' },
               { id: 'qwen_max', label: '百炼官方价 · 北京', url: 'https://help.aliyun.com/zh/model-studio/qwen3-8-max', verified: '2026-11-13' },
+              { id: 'qwen4_max', label: '百炼官方价 · 北京', url: 'https://help.aliyun.com/zh/model-studio/model-pricing', verified: '2026-11-17' },
               { id: 'glm', label: '智谱官方价', url: 'https://docs.bigmodel.cn/cn/guide/start/pricing', verified: '2026-11-16' },
               { id: 'qwen_preview', label: 'Token Plan 官方说明', url: 'https://help.aliyun.com/zh/model-studio/qwen4-max-preview', verified: '2026-11-16' },
             ],
@@ -372,8 +373,8 @@ async function main() {
             rows: window.usageRows || (args.days === 30 ? largeUsage : args.days === 1 ? [] : [
               { client: 'codex', model: 'gpt-6.1-sol', tokens: { input: 250, output: 500, cache_read: 1000, cache_write: 0, cache_write_long: 0 },
                 estimate: { low_cny: 0.03761744, high_cny: 0.03761744, source: 'openai' } },
-              { client: 'desktop', model: 'qwen3.8-max', tokens: { input: 500, output: 150, cache_read: 100, cache_write: 30, cache_write_long: 20 },
-                estimate: { low_cny: 0.01225, high_cny: 0.0123, source: 'qwen_max' } },
+              { client: 'desktop', model: 'qwen4-max', tokens: { input: 500, output: 150, cache_read: 100, cache_write: 30, cache_write_long: 20 },
+                estimate: { low_cny: 0.010325, high_cny: 0.010325, source: 'qwen4_max' } },
               { client: 'code', model: 'glm-5.3', tokens: { input: 70, output: 10, cache_read: 0, cache_write: 0, cache_write_long: 0 },
                 estimate: { low_cny: 0.00084, high_cny: 0.00084, source: 'glm' } },
             ]),
@@ -1006,7 +1007,9 @@ async function main() {
     assert.equal(await page.locator('#usage-output').innerText(), '< 0.001 M');
     assert.equal(await page.locator('#usage-cache-write').getAttribute('title'), '50 Token');
     assert.ok(await page.getByRole('link', { name: 'OpenAI 官方价' }).isVisible());
-    assert.ok(await page.getByRole('link', { name: '百炼官方价 · 北京' }).isVisible());
+    const qwen4Price = page.getByRole('row', { name: /qwen4-max/ }).getByRole('link', { name: '百炼官方价 · 北京' });
+    assert.ok(await qwen4Price.isVisible());
+    assert.equal(await qwen4Price.getAttribute('href'), 'https://help.aliyun.com/zh/model-studio/model-pricing');
     await page.locator('.usage-pricing summary').click();
     assert.ok(await page.getByRole('link', { name: /1 美元 = 6.7174 元人民币/ }).isVisible());
     await page.locator('.usage-pricing summary').click();
@@ -1014,7 +1017,7 @@ async function main() {
     assert.ok(await page.getByRole('link', { name: '智谱官方价' }).isVisible());
     assert.equal(await page.getByRole('link', { name: '智谱官方价' }).getAttribute('title'), '核对于 2026-11-16');
     assert.equal(await page.locator('#usage-cost-caption').innerText(), '已估算 100% Token 的参考费用');
-    assert.equal(await page.locator('#usage-pricing-date').innerText(), 'CodeNeo Lite 0.1.8 · 价格表更新于 2026-11-16');
+    assert.equal(await page.locator('#usage-pricing-date').innerText(), 'CodeNeo Lite 0.1.8 · 价格表更新于 2026-11-17');
     assert.equal(await page.locator('#usage-cost-note').isVisible(), false);
     assert.equal(await page.locator('#usage-partial').isVisible(), false);
     await page.locator('#usage-client').selectOption('workbuddy');

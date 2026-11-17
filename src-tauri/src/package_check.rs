@@ -17,6 +17,15 @@ pub fn run() -> Result<serde_json::Value, String> {
     if (glm.high_cny - 0.0146).abs() > 1e-10 || (glm.low_cny - 0.0146).abs() > 1e-10 {
         return Err("安装包 GLM-5.3 计价校验失败".into());
     }
+    let qwen = usage_prices::estimate("qwen4-max", Tokens {
+        cache_write: 100,
+        cache_write_long: 50,
+        ..tokens
+    })
+    .map_err(|_| "安装包缺少 Qwen4-Max 计价规则")?;
+    if (qwen.high_cny - 0.0185).abs() > 1e-10 || (qwen.low_cny - 0.0185).abs() > 1e-10 {
+        return Err("安装包 Qwen4-Max 计价校验失败".into());
+    }
     for model in ["qwen4-max-preview", "qwen4.0-max-preview"] {
         if !matches!(usage_prices::estimate(model, tokens), Err(issue) if issue.reason == Reason::PlanOnly)
         {
@@ -33,6 +42,7 @@ pub fn run() -> Result<serde_json::Value, String> {
         "pricing_verified": usage_prices::VERIFIED,
         "pricing_contract": 2,
         "glm_5_3_cny": glm.high_cny,
+        "qwen4_max_cny": qwen.high_cny,
         "qwen4_aliases": "plan_only",
         "unknown_model": "missing_price"
     }))

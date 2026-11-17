@@ -384,6 +384,7 @@ fn model_catalog(
 ) -> Result<Value, String> {
     let mut seen = BTreeSet::new();
     let mut entries = Vec::new();
+    let endpoint = reqwest::Url::parse(account.base_for(models::Protocol::Responses)).ok();
     let candidates = store.models.iter().filter(|model| {
         !using_gateway && model.account == primary.account && model.id != primary.id
     });
@@ -392,6 +393,7 @@ fn model_catalog(
         if !seen.insert(slug.clone()) {
             continue;
         }
+        let qwen4 = endpoint.as_ref().is_some_and(|url| model_effort::is_qwen4_responses(url, &slug));
         let effort = model_effort::options(account, models::Protocol::Responses, &slug, catalogs)
             .within(&http::EffortLevel::ALL);
         let levels: Vec<_> = effort.iter().flat_map(|effort| &effort.levels)
@@ -418,9 +420,9 @@ fn model_catalog(
             "base_instructions": "You are a coding assistant. Work with the user in the current workspace.",
             "support_verbosity": false,
             "truncation_policy": {"mode": "tokens", "limit": 4000},
-            "context_window": if model.model.ends_with("[1m]") { 1_000_000 } else { 32_768 },
+            "context_window": if qwen4 || model.model.ends_with("[1m]") { 1_000_000 } else { 32_768 },
             "experimental_supported_tools": [],
-            "input_modalities": ["text"],
+            "input_modalities": if qwen4 { &["text", "image"][..] } else { &["text"][..] },
             "supports_search_tool": false,
         }));
     }
@@ -904,6 +906,30 @@ mod tests {
             .get(Some("mcp_servers"), "original")
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn qwen4_catalog_declares_official_context_and_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let id = models::save(
+            root,
+            serde_json::from_value(json!({
+                "preset": "qwen", "account_name": "", "base_url": "", "auth": "auth_token",
+                "name": "Qwen4-Max", "model": "qwen4-max", "key": "sk-sp-fixture",
+            })).unwrap(),
+            Some(Client::Codex),
+        ).unwrap();
+        let (_, store) = models::read(root).unwrap();
+        let (model, account) = store.model(&id).unwrap();
+        let catalog = model_catalog(&store, model, account, true, &Default::default()).unwrap();
+        let entry = &catalog[0];
+        assert_eq!(entry["context_window"], 1_000_000);
+        assert_eq!(entry["input_modalities"], json!(["text", "image"]));
+        assert_eq!(entry["default_reasoning_level"], "high");
+        let levels: Vec<_> = entry["supported_reasoning_levels"].as_array().unwrap()
+            .iter().map(|level| level["effort"].as_str().unwrap()).collect();
+        assert_eq!(levels, ["low", "high", "xhigh"]);
     }
 
     #[test]

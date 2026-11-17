@@ -105,7 +105,8 @@ fn gateway_key(root: &Path, reference: &str) -> Result<String, String> {
 
 impl Route {
     pub(crate) fn prepare_effort(&self, payload: &mut Value) {
-        if self.effort.is_none() && payload["model"].as_str() == Some(self.model.as_str()) {
+        let qwen4 = model_effort::is_qwen4_responses(&self.endpoint, &self.model);
+        if !qwen4 && self.effort.is_none() && payload["model"].as_str() == Some(self.model.as_str()) {
             return;
         }
         let Some(reasoning) = payload.get_mut("reasoning").and_then(Value::as_object_mut) else {
@@ -115,7 +116,17 @@ impl Route {
             return;
         };
         let level = model_transport::EffortLevel::parse(value);
-        let supported = level.and_then(|level| self.effort.as_ref()?.nearest(level));
+        let supported = if qwen4 {
+            use model_transport::EffortLevel::*;
+            level.map(|level| match level {
+                Minimal => Low,
+                Medium => High,
+                Max | Ultra => XHigh,
+                _ => level,
+            })
+        } else {
+            level.and_then(|level| self.effort.as_ref()?.nearest(level))
+        };
         if supported == level && supported.is_some() {
             return;
         }
@@ -259,6 +270,32 @@ impl ReasoningScope {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn qwen4_normalizes_codex_effort_using_the_official_mapping() {
+        let route = Route {
+            endpoint: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/responses"
+                .parse()
+                .unwrap(),
+            model: models::QWEN4_MAX.into(),
+            key: String::new(),
+            upstream_key: String::new(),
+            effort: None,
+        };
+        for (requested, expected) in [
+            ("none", "none"), ("minimal", "low"), ("medium", "high"), ("max", "xhigh"),
+        ] {
+            let mut request = json!({"model": route.model, "reasoning": {"effort": requested, "summary": "auto"}});
+            route.prepare_effort(&mut request);
+            assert_eq!(request["reasoning"], json!({"effort": expected, "summary": "auto"}));
         }
     }
 }
