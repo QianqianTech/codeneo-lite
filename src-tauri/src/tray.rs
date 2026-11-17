@@ -7,6 +7,8 @@ use tauri::{
 };
 
 const ID: &str = "lite-tray";
+const START_GATEWAY: &str = "start-gateway";
+const PAUSE_GATEWAY: &str = "pause-gateway";
 
 fn show(app: &AppHandle, page: &str) {
     #[cfg(target_os = "macos")]
@@ -153,12 +155,12 @@ fn items(app: &AppHandle, view: &Value, client: Client) -> tauri::Result<Submenu
     Ok(submenu)
 }
 
-fn menu(app: &AppHandle, view: &Value) -> tauri::Result<Menu<tauri::Wry>> {
+fn menu(app: &AppHandle, view: &Value, gateway_ready: bool) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
-    let (id, label) = if gateway::is_paused() {
-        ("resume-gateway", "恢复网关")
+    let (id, label) = if gateway_ready {
+        (PAUSE_GATEWAY, "🟢 暂停网关")
     } else {
-        ("pause-gateway", "暂停网关")
+        (START_GATEWAY, "启动网关")
     };
     menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
     for client in Client::ALL {
@@ -192,19 +194,26 @@ pub fn refresh(app: &AppHandle) {
     let view = secrets::root()
         .and_then(|root| clients::view(&root))
         .unwrap_or(Value::Null);
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let (Some(tray), Ok(menu)) = (handle.tray_by_id(ID), menu(&handle, &view)) {
-            let _ = tray.set_menu(Some(menu));
-        }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let service = gateway::SERVICE.lock().await;
+        let ready = service.is_ready();
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let (Some(tray), Ok(menu)) = (handle.tray_by_id(ID), menu(&handle, &view, ready)) {
+                let _ = tray.set_menu(Some(menu));
+            }
+        });
     });
 }
 
 pub async fn set_gateway_paused(app: &AppHandle, paused: bool) -> Result<(), String> {
-    gateway::set_paused(paused).await?;
+    let result = gateway::set_paused(paused).await;
     refresh(app);
-    let _ = app.emit("lite-gateway-changed", ());
-    Ok(())
+    if result.is_ok() {
+        let _ = app.emit("lite-gateway-changed", ());
+    }
+    result
 }
 
 pub fn changed(app: &AppHandle, client: &str, message: &str, error: bool) {
@@ -221,12 +230,12 @@ pub fn install(app: &App) -> tauri::Result<()> {
         .unwrap_or(Value::Null);
     let builder = TrayIconBuilder::with_id(ID)
         .tooltip("CodeNeo Lite")
-        .menu(&menu(app.handle(), &view)?)
+        .menu(&menu(app.handle(), &view, false)?)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
             let id = event.id.as_ref();
-            if matches!(id, "pause-gateway" | "resume-gateway") {
-                let paused = id == "pause-gateway";
+            if matches!(id, PAUSE_GATEWAY | START_GATEWAY) {
+                let paused = id == PAUSE_GATEWAY;
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = set_gateway_paused(&app, paused).await {
@@ -297,7 +306,12 @@ pub fn install(app: &App) -> tauri::Result<()> {
                     }
                     let _ = app.emit(
                         "lite-launch",
-                        json!({"client": client.id(), "message": message, "error": error}),
+                        json!({
+                            "client": client.id(),
+                            "message": message,
+                            "error": error,
+                            "cwd": working_dir.as_deref().and_then(|path| path.to_str()),
+                        }),
                     );
                 });
                 return;

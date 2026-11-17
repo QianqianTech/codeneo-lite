@@ -13,6 +13,7 @@ const lite = (() => {
   const modeClients = new Set(["desktop", "code", "codex"]);
   const gatewayClients = new Set(["desktop", "codex"]);
   const agentDrafts = new Map();
+  const projectDirectories = new Map();
   const running = new Set();
   const clientMessages = new Map();
   const launchMessages = new Map();
@@ -81,6 +82,14 @@ const lite = (() => {
 
   function canApply(client) {
     return !!(invoke && client?.status && !["managed", "unavailable"].includes(client.status.state));
+  }
+
+  function requiresProjectDirectory(id, action) {
+    return action === "terminal" && (id === "code" || id === "codex");
+  }
+
+  function missingProjectDirectory(id, action) {
+    return requiresProjectDirectory(id, action) && !projectDirectories.has(id);
   }
 
   function statusLabel(target, installed = target.installed) {
@@ -208,7 +217,8 @@ const lite = (() => {
     await refresh();
     if (api.page === "clients" && activeClient === id) {
       const first = Object.keys(launchButtons).map($).find(node => !node.hidden && !node.disabled);
-      first?.focus();
+      if (first) first.focus();
+      else if (!$("terminal-project").hidden) $("choose-terminal-project").focus();
     }
   }
 
@@ -312,7 +322,7 @@ const lite = (() => {
     apply.disabled = locked || !ready || !!desktopReload;
     const launchButton = $("apply-client-launch");
     launchButton.hidden = !action;
-    launchButton.disabled = locked || !ready;
+    launchButton.disabled = locked || !ready || missingProjectDirectory(id, action);
     launchButton.classList.toggle("primary", !hotSwitch);
     launchButton.classList.toggle("secondary", hotSwitch);
     launchButton.dataset.action = action;
@@ -328,7 +338,7 @@ const lite = (() => {
     }
     const note = $("client-mode-note");
     const guidance = local && gatewayState?.paused
-      ? "网关已暂停。恢复网关后，此档案可用于新的请求。"
+      ? "网关已暂停。启动网关后，此档案可用于新的请求。"
       : local
       ? (hotSwitch
         ? "点击「应用模式」后，原会话的下一条请求会使用所选档案，并将续聊上下文发给该供应商。请保持 Lite 运行。"
@@ -388,6 +398,7 @@ const lite = (() => {
     const gatewayStatus = $("gateway-status");
     gatewayStatus.hidden = !status.local_gateway;
     gatewayStatus.textContent = gatewayState?.paused ? "CodeNeo Lite网关 · 已暂停"
+      : gatewayState?.ready === false ? "CodeNeo Lite网关 · 未就绪"
       : status.gateway_verified ? "CodeNeo Lite网关 · 已完成转发"
       : status.gateway_ready ? "CodeNeo Lite网关 · 已就绪" : "CodeNeo Lite网关";
     const supported = target.protocols || [target.protocol];
@@ -445,27 +456,38 @@ const lite = (() => {
       : target.agent && target.launch?.terminal ? "terminal"
         : target.launch?.open ? "open" : "terminal";
     after.hidden = !feedback?.actionable || !target.launch?.[action] || !!status.pending;
-    after.disabled = running.has(target.id);
+    after.disabled = running.has(target.id) || missingProjectDirectory(target.id, action);
     after.dataset.action = action;
     after.textContent = action === "restart" ? "重启以生效"
       : action === "open" ? "打开客户端" : "启动新会话";
   }
 
   function renderLaunch(target) {
-    const controls = target.launch;
-    const codexAction = target.id === "codex" ? activeLaunch : "";
+    const { id: clientId, launch: controls } = target;
+    const codexAction = clientId === "codex" ? activeLaunch : "";
     const primaryAction = codexAction || (controls?.open ? "open" : "terminal");
+    const locked = !invoke || running.has(clientId);
     for (const [id, action] of Object.entries(launchButtons)) {
       const node = $(id);
       node.hidden = !controls?.[action] || (!!codexAction && action !== codexAction);
-      node.disabled = !invoke || running.has(target.id) || (target.id === "code" && !!target.status.pending);
+      node.disabled = locked || (clientId === "code" && !!target.status.pending) || missingProjectDirectory(clientId, action);
       node.classList.toggle("primary", action === primaryAction);
       node.classList.toggle("secondary", action !== primaryAction);
     }
     $("client-launch").hidden = Object.keys(launchButtons).every(id => $(id).hidden);
+    $("terminal-project").hidden = $("terminal-client").hidden || !requiresProjectDirectory(clientId, "terminal");
+    const directory = projectDirectories.get(clientId);
+    const path = $("terminal-project-path");
+    const pathText = directory || "尚未选择";
+    if (path.textContent !== pathText) path.textContent = pathText;
+    path.classList.toggle("muted", !directory);
+    const choose = $("choose-terminal-project");
+    choose.disabled = locked;
+    choose.classList.toggle("primary", !directory);
+    choose.classList.toggle("secondary", !!directory);
     $("open-client").textContent = `打开 ${target.name}`;
     $("restart-client").textContent = `重启 ${target.name}`;
-    $("terminal-client").textContent = target.id === "codex" ? "启动 Codex CLI" : "在终端启动";
+    $("terminal-client").textContent = clientId === "codex" ? "启动 Codex CLI" : "在终端启动";
     const codeEffort = $("code-effort");
     const levels = target.id === "code" && controls?.terminal ? target.status.code_efforts || [] : [];
     const profile = levels.length ? target.status.selected || "" : "";
@@ -473,7 +495,7 @@ const lite = (() => {
     codeEffort.dataset.profile = profile;
     codeEffort.replaceChildren(option("按 Claude Code 设置", ""), ...levels.map(level => option(effortLabels[level], level)));
     codeEffort.value = levels.includes(selectedEffort) ? selectedEffort : "";
-    codeEffort.disabled = $("terminal-client").disabled;
+    codeEffort.disabled = locked || !!target.status.pending;
     $("code-effort-field").hidden = levels.length === 0;
     $("launch-note").textContent = codexAction && controls?.[codexAction] === false
       ? (codexAction === "terminal" ? "未检测到 codex 命令。安装后刷新状态。" : "未检测到 Codex 桌面应用。")
@@ -501,22 +523,41 @@ const lite = (() => {
     return confirmAction(`重启 ${name}？`, "重启会退出当前窗口。请先保存正在进行的工作。", "确认重启");
   }
 
+  async function chooseTerminalProject() {
+    const id = activeClient;
+    const choose = $("choose-terminal-project");
+    if ($("terminal-project").hidden || choose.disabled) return;
+    running.add(id);
+    renderClients();
+    try {
+      const directory = await invoke("pick_terminal_directory");
+      if (directory) {
+        projectDirectories.set(id, directory);
+        launchMessages.delete(id);
+      }
+    } catch (error) {
+      launchMessages.set(id, { kind: "error", text: errorText(error) });
+    } finally {
+      running.delete(id);
+      renderClients();
+      if (id === activeClient && api.page === "clients" && !$("terminal-project").hidden) {
+        choose.focus({ preventScroll: true });
+      }
+    }
+  }
+
   async function startClient(action) {
     const target = client();
     if (!invoke || !target?.launch?.[action] || running.has(target.id)) return;
     if (action === "restart" && !(await confirmRestart(target.name))) return;
     const { id } = target;
+    if (missingProjectDirectory(id, action)) return;
     const codeEffort = id === "code" && action === "terminal" ? $("code-effort").value : "";
     const args = { client: id, action };
+    if (requiresProjectDirectory(id, action)) args.cwd = projectDirectories.get(id);
     if (codeEffort) args.codeEffort = codeEffort;
     running.add(id);
     try {
-      if (action === "terminal" && (id === "code" || id === "codex")) {
-        renderClients();
-        const cwd = await invoke("pick_terminal_directory");
-        if (!cwd) return;
-        args.cwd = cwd;
-      }
       launchMessages.set(id, { kind: "pending", text: action === "restart" ? "正在重启客户端…" : "正在打开客户端…" });
       renderClients();
       const result = await invoke("launch_client", args);
@@ -540,7 +581,7 @@ const lite = (() => {
     indicator.dataset.paused = String(paused);
     indicator.title = label;
     indicator.setAttribute("aria-label", label);
-    $("gateway-action-label").textContent = paused ? "恢复网关" : "暂停网关";
+    $("gateway-action-label").textContent = ready ? "暂停网关" : "启动网关";
     $("toggle-gateway").disabled = !gatewayState || changingGateway;
   }
 
@@ -549,10 +590,13 @@ const lite = (() => {
     const index = ++gatewaySequence;
     const state = await invoke("lite_gateway_status").catch(() => null);
     if (!state || index !== gatewaySequence) return;
-    const pauseChanged = state.paused !== gatewayState?.paused;
+    const changed = state.paused !== gatewayState?.paused || state.ready !== gatewayState?.ready;
     gatewayState = state;
     renderGatewayControl();
-    if (pauseChanged) renderClients();
+    if (changed) {
+      if (state.ready) message($("gateway-feedback"), "");
+      renderClients();
+    }
   }
 
   async function toggleGateway() {
@@ -561,7 +605,7 @@ const lite = (() => {
     renderGatewayControl();
     message($("gateway-feedback"), "");
     try {
-      await invoke("lite_set_gateway_paused", { paused: !gatewayState.paused });
+      await invoke("lite_set_gateway_paused", { paused: gatewayState.ready });
     } catch (error) {
       message($("gateway-feedback"), "error", errorText(error));
     } finally {
@@ -600,12 +644,6 @@ const lite = (() => {
     const hotSwitch = command === "switch_model_mode" && args.connection === "gateway" && client(id).status.local_gateway;
     const pending = reopen ? (args.action === "restart" ? "正在应用配置并重启客户端…" : "正在应用模式并启动客户端…") : "正在写入本机配置…";
     try {
-      if (command === "switch_model_mode" && id === "codex" && args.action === "terminal") {
-        renderClients();
-        const cwd = await invoke("pick_terminal_directory");
-        if (!cwd) return false;
-        args = { ...args, cwd };
-      }
       clientMessages.set(id, { kind: "pending", text: pending });
       renderClients();
       const result = await invoke(command, { client: id, ...args });
@@ -633,7 +671,7 @@ const lite = (() => {
 
   async function applyMode(action = null) {
     const target = client();
-    if (!canApply(target)) return;
+    if (!canApply(target) || missingProjectDirectory(target.id, action)) return;
     const modes = modeClients.has(target.id);
     const third = !modes || $("client-mode").value === "third_party";
     const id = third ? $("client-model-picker").value : null;
@@ -642,6 +680,7 @@ const lite = (() => {
     if (action === "restart" && !(await confirmRestart(target.name))) return;
     const args = modes ? { id, connection, action } : { id };
     if (target.id === "codex") args.surface = activeLaunch === "terminal" ? "cli" : "desktop";
+    if (requiresProjectDirectory(target.id, action)) args.cwd = projectDirectories.get(target.id);
     void clientAction(target.id, modes ? "switch_model_mode" : "apply_model", args);
   }
 
@@ -696,6 +735,7 @@ const lite = (() => {
     if (api.page === link.dataset.page) window.scrollTo(0, 0);
     show(link.dataset.page);
   });
+  $("choose-terminal-project").addEventListener("click", chooseTerminalProject);
   for (const [id, action] of Object.entries(launchButtons)) {
     $(id).addEventListener("click", () => startClient(action));
   }
@@ -785,15 +825,17 @@ const lite = (() => {
       void refresh();
     }).catch(() => {});
     void tauri.event.listen("lite-launch", ({ payload }) => {
+      if (payload.cwd) projectDirectories.set(payload.client, payload.cwd);
       launchMessages.set(payload.client, { kind: payload.error ? "error" : "success", text: payload.message });
       void refresh();
     }).catch(() => {});
     void tauri.event.listen("lite-gateway-changed", () => {
       message($("gateway-feedback"), "");
-      void refreshGateway();
+      void refresh();
     }).catch(() => {});
     void tauri.event.listen("lite-gateway-error", ({ payload }) => {
       message($("gateway-feedback"), "error", errorText(payload));
+      void refreshGateway();
     }).catch(() => {});
   }
   window.addEventListener("focus", () => { if (invoke) void refresh(); });

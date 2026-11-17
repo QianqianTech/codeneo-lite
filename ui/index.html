@@ -42,9 +42,9 @@
                 <span class="status" id="client-status"></span>
               </div>
               <div class="client-header-actions">
-                <button type="button" class="secondary" id="toggle-gateway" aria-labelledby="gateway-action-label" disabled>
+                <button type="button" class="secondary" id="toggle-gateway" aria-labelledby="gateway-action-label" aria-describedby="gateway-indicator" disabled>
                   <span class="gateway-indicator" id="gateway-indicator" role="img" data-ready="false" aria-label="网关未就绪" title="网关未就绪"></span>
-                  <span id="gateway-action-label">暂停网关</span>
+                  <span id="gateway-action-label">启动网关</span>
                 </button>
                 <button type="button" class="icon-button" id="refresh-clients" title="刷新状态" aria-label="刷新状态">
                   <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -57,6 +57,13 @@
             <p class="feedback" id="gateway-feedback" role="status" hidden></p>
             <div id="client-detail" hidden>
               <section aria-labelledby="current-client">
+                <div class="terminal-project" id="terminal-project" role="group" aria-labelledby="terminal-project-label" hidden>
+                  <div>
+                    <strong id="terminal-project-label">项目目录</strong>
+                    <p id="terminal-project-path" class="muted" aria-live="polite">尚未选择</p>
+                  </div>
+                  <button type="button" class="secondary" id="choose-terminal-project" aria-describedby="terminal-project-path">选择目录…</button>
+                </div>
                 <div class="button-row client-launch" id="client-launch" hidden>
                   <button type="button" id="open-client" hidden>打开客户端</button>
                   <button type="button" id="restart-client" hidden>重启客户端</button>

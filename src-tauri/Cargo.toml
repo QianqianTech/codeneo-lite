@@ -1,6 +1,6 @@
 [package]
 name = "codeneo-lite"
-version = "0.1.12"
+version = "0.1.14"
 edition.workspace = true
 rust-version = "1.96"
 license-file = "../LICENSE"

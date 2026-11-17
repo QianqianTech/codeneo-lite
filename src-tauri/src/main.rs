@@ -605,11 +605,13 @@ fn main() {
                 }
             }
             let _ = tray::install(app);
-            start_pending_check(app.handle().clone());
-            tauri::async_runtime::spawn(async {
+            let handle = app.handle().clone();
+            start_pending_check(handle.clone());
+            tauri::async_runtime::spawn(async move {
                 if let Err(error) = gateway::restore_routes().await {
                     claudekeeper_app::diagnostics::record("warn", "gateway-startup", &error);
                 }
+                tray::refresh(&handle);
             });
             Ok(())
         })

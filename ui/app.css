@@ -264,6 +264,12 @@ button:disabled, select:disabled, input:disabled, textarea:disabled { opacity: .
   max-width: 100%; overflow-wrap: anywhere; padding: 3px 7px;
   border-radius: var(--control-radius); background: var(--field); color: var(--muted);
 }
+.terminal-project {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: 10px; margin-bottom: 10px; padding: 9px 12px;
+  border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--sidebar);
+}
+#terminal-project-path { margin-top: 2px; user-select: text; }
 .client-launch { margin-bottom: 14px; }
 .client-launch button { max-width: 100%; overflow-wrap: anywhere; }
 .client-effort { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

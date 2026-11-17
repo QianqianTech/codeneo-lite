@@ -56,6 +56,7 @@ async function main() {
       window.switches = [];
       window.gatewayAvailable = true;
       window.gatewayPaused = false;
+      const hasGatewayRoute = () => clients.some(client => client.status.gateway_ready);
       const listeners = new Map();
       window.setGatewayPaused = paused => {
         window.gatewayPaused = paused;
@@ -108,9 +109,15 @@ async function main() {
         }
         if (command === 'lite_gateway_status') return {
           paused: window.gatewayPaused,
-          ready: !window.gatewayPaused && window.gatewayAvailable && clients.some(client => client.status.gateway_ready),
+          ready: !window.gatewayPaused && window.gatewayAvailable && hasGatewayRoute(),
         };
-        if (command === 'lite_set_gateway_paused') return window.setGatewayPaused(args.paused);
+        if (command === 'lite_set_gateway_paused') {
+          if (!args.paused) {
+            if (!hasGatewayRoute()) throw '请先在 Claude Desktop 或 Codex 应用使用 Lite 网关的模型档案。';
+            window.gatewayAvailable = true;
+          }
+          return window.setGatewayPaused(args.paused);
+        }
         if (command === 'pick_terminal_directory') {
           window.pickTerminalDirectoryCalls++;
           return window.pendingTerminalDirectory ?? window.terminalDirectoryToPick;
@@ -386,12 +393,16 @@ async function main() {
     const restartDialog = page.getByRole('dialog', { name: '重启 Claude Desktop？', exact: true });
     const confirmRestart = () => restartDialog.getByRole('button', { name: '确认重启', exact: true }).click();
     const gatewayIndicator = ready => page.getByRole('img', { name: ready ? '网关正常' : '网关未就绪', exact: true });
+    const startGateway = page.getByRole('button', { name: '启动网关', exact: true });
+    const pauseGateway = page.getByRole('button', { name: '暂停网关', exact: true });
     const capture = async (name, options = {}) => {
       if (process.env.LITE_QA_DIR) await page.screenshot({ path: path.join(process.env.LITE_QA_DIR, name + '.png'), ...options });
     };
 
     await page.getByRole('heading', { name: 'Claude Desktop', exact: true }).waitFor();
     await gatewayIndicator(false).waitFor();
+    await startGateway.click();
+    await page.locator('#gateway-feedback').getByText('请先在 Claude Desktop 或 Codex 应用使用 Lite 网关的模型档案。', { exact: true }).waitFor();
     assert.equal(await page.getByRole('combobox', { name: '连接方式', exact: true }).inputValue(), 'gateway');
     assert.equal(await page.locator('#current-model').innerText(), 'qwen3.8-max');
     await page.getByRole('button', { name: '打开 Claude Desktop', exact: true }).click();
@@ -530,24 +541,29 @@ async function main() {
     assert.deepEqual(await page.locator('#current-models code').allTextContents(), ['默认 · k3.1-pro', 'k3']);
     assert.equal(await page.locator('#gateway-status').innerText(), 'CodeNeo Lite网关 · 已就绪');
     await gatewayIndicator(true).waitFor();
-    const pauseGateway = page.getByRole('button', { name: '暂停网关', exact: true });
-    const resumeGateway = page.getByRole('button', { name: '恢复网关', exact: true });
+    for (const colorScheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme });
+      const color = await gatewayIndicator(true).evaluate(dot => getComputedStyle(dot).backgroundColor);
+      const [red, green, blue] = color.match(/\d+/g).map(Number);
+      assert.ok(green > red && green > blue, `Ready gateway uses a green dot in ${colorScheme} mode`);
+    }
+    await page.emulateMedia({ colorScheme: null });
+    await capture('gateway-ready');
     const pausedIndicator = page.getByRole('img', { name: '网关已暂停', exact: true });
     await pauseGateway.click();
-    await resumeGateway.waitFor();
+    await startGateway.waitFor();
     await pausedIndicator.waitFor();
     assert.equal(await page.locator('#gateway-status').innerText(), 'CodeNeo Lite网关 · 已暂停');
     await capture('gateway-paused');
-    await resumeGateway.click();
+    await startGateway.click();
     await gatewayIndicator(true).waitFor();
     await page.evaluate(() => window.setGatewayPaused(true));
-    await resumeGateway.waitFor();
+    await startGateway.waitFor();
     await page.evaluate(() => window.setGatewayPaused(false));
     await pauseGateway.waitFor();
     await page.evaluate(() => { window.gatewayAvailable = false; });
     await gatewayIndicator(false).waitFor({ timeout: 8000 });
-    await page.evaluate(() => { window.gatewayAvailable = true; });
-    await page.getByRole('button', { name: '刷新状态' }).click();
+    await startGateway.click();
     await gatewayIndicator(true).waitFor();
     await page.getByRole('button', { name: '拉取模型', exact: true }).click();
     await page.getByText('供应商模型目录（1 项）', { exact: true }).waitFor();
@@ -675,6 +691,17 @@ async function main() {
       client: 'desktop', id: null, connection: null, action: 'restart',
     });
     await client('Claude Code').click();
+    const projectPanel = page.getByRole('group', { name: '项目目录', exact: true });
+    const chooseProject = projectPanel.getByRole('button', { name: '选择目录…', exact: true });
+    const launchCode = page.getByRole('button', { name: '在终端启动', exact: true });
+    const codeProject = '/mock/Claude Code/中文项目';
+    await projectPanel.getByText('尚未选择', { exact: true }).waitFor();
+    assert.ok(await launchCode.isDisabled());
+    const launchesBeforeCodeSelection = await page.evaluate(() => window.launches.length);
+    await page.evaluate(directory => { window.terminalDirectoryToPick = directory; }, codeProject);
+    await chooseProject.click();
+    await projectPanel.getByText(codeProject, { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.launches.length), launchesBeforeCodeSelection);
     await page.getByLabel('运行模式').selectOption('third_party');
     await page.locator('#client-model-picker').selectOption('k3.1-pro-profile');
     await page.getByRole('button', { name: '配置模型映射', exact: true }).click();
@@ -682,10 +709,10 @@ async function main() {
     await page.getByLabel('子 Agent', { exact: true }).fill('k3');
     await page.getByRole('button', { name: '保存并应用', exact: true }).click();
     await page.getByText('等待 Claude Code 会话退出后应用 Kimi 工作档。', { exact: true }).waitFor();
-    assert.ok(await page.getByRole('button', { name: '在终端启动', exact: true }).isDisabled());
+    assert.ok(await launchCode.isDisabled());
     await page.getByRole('button', { name: '取消等待', exact: true }).click();
     await page.getByText('已取消等待中的切换。').waitFor();
-    await page.getByRole('button', { name: '在终端启动', exact: true }).click();
+    await launchCode.click();
     await page.getByText('已请求启动 Claude Code。', { exact: true }).waitFor();
     const codeEffort = page.getByLabel('新会话思考强度');
     assert.ok(!(await codeEffort.isVisible()));
@@ -694,30 +721,52 @@ async function main() {
     await codeEffort.waitFor();
     assert.deepEqual(await codeEffort.locator('option').evaluateAll(opts => opts.map(opt => opt.value)), ['', 'low', 'high', 'max']);
     await codeEffort.selectOption('max');
-    await page.getByRole('button', { name: '在终端启动', exact: true }).click();
+    await launchCode.click();
     await page.getByText('已请求启动 Claude Code。', { exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.lastLaunchEffort), 'max');
-    assert.equal(await page.evaluate(() => window.lastLaunchCwd), '/mock/project');
-    assert.ok(await page.evaluate(() => window.pickTerminalDirectoryCalls > 0));
+    assert.equal(await page.evaluate(() => window.lastLaunchCwd), codeProject);
 
     await client('Codex').click();
+    assert.ok(!(await projectPanel.isVisible()));
     await page.getByRole('button', { name: '打开 Codex', exact: true }).click();
     assert.deepEqual(await page.evaluate(() => window.launches.at(-1)), ['codex', 'open']);
     assert.ok(!(await page.locator('#terminal-client').isVisible()));
     await client('Codex CLI').click();
     assert.equal(await client('Codex').getAttribute('aria-pressed'), 'false');
     assert.equal(await client('Codex CLI').getAttribute('aria-pressed'), 'true');
+    const launchCodex = page.getByRole('button', { name: '启动 Codex CLI', exact: true });
+    const applyAndLaunch = page.getByRole('button', { name: '应用并启动 Codex CLI', exact: true });
+    await projectPanel.getByText('尚未选择', { exact: true }).waitFor();
+    assert.ok(await launchCodex.isDisabled());
+    assert.ok(await applyAndLaunch.isDisabled());
+    assert.ok(await page.getByRole('button', { name: '应用模式', exact: true }).isEnabled());
     const codexLaunchesBeforePicker = await page.evaluate(() => window.launches.length);
+    const switchesBeforePicker = await page.evaluate(() => window.switches.length);
     const pickerCallsBeforeCancel = await page.evaluate(() => window.pickTerminalDirectoryCalls);
-    await page.evaluate(() => { window.terminalDirectoryToPick = null; });
-    await page.getByRole('button', { name: '启动 Codex CLI', exact: true }).click();
-    await page.evaluate(() => { window.terminalDirectoryToPick = '/mock/project'; });
+    await page.evaluate(() => {
+      window.pendingTerminalDirectory = new Promise(resolve => { window.resolveTerminalDirectory = resolve; });
+    });
+    await chooseProject.click();
+    assert.ok(await chooseProject.isDisabled());
+    await page.evaluate(() => {
+      window.resolveTerminalDirectory(null);
+      window.pendingTerminalDirectory = null;
+    });
+    await page.locator('#choose-terminal-project:enabled').waitFor();
+    assert.ok(await applyAndLaunch.isDisabled());
     assert.equal(await page.evaluate(() => window.launches.length), codexLaunchesBeforePicker);
+    assert.equal(await page.evaluate(() => window.switches.length), switchesBeforePicker);
     assert.equal(await page.evaluate(() => window.pickTerminalDirectoryCalls), pickerCallsBeforeCancel + 1);
-    await page.getByRole('button', { name: '启动 Codex CLI', exact: true }).click();
+    const codexProject = '/mock/Codex CLI/project';
+    await page.evaluate(directory => { window.terminalDirectoryToPick = directory; }, codexProject);
+    await chooseProject.click();
+    await projectPanel.getByText(codexProject, { exact: true }).waitFor();
+    const pickerCallsBeforeLaunch = await page.evaluate(() => window.pickTerminalDirectoryCalls);
+    await launchCodex.click();
     await page.getByText('已请求启动 Codex。', { exact: true }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.launches.at(-1)), ['codex', 'terminal']);
-    assert.equal(await page.evaluate(() => window.lastLaunchCwd), '/mock/project');
+    assert.equal(await page.evaluate(() => window.lastLaunchCwd), codexProject);
+    assert.equal(await page.evaluate(() => window.pickTerminalDirectoryCalls), pickerCallsBeforeLaunch);
     await page.getByRole('button', { name: '配置新模型' }).click();
     assert.equal(await page.locator('#provider-picker option[value="kimi"]').count(), 0);
     await page.locator('#provider-picker').selectOption('openai');
@@ -741,30 +790,25 @@ async function main() {
     await page.getByRole('button', { name: '验证供应商', exact: true }).click();
     await page.getByText('模型调用通过，耗时 23 毫秒。', { exact: true }).waitFor();
     await page.getByRole('heading', { name: 'Codex CLI', exact: true }).waitFor();
-    const applyAndLaunch = page.getByRole('button', { name: '应用并启动 Codex CLI', exact: true });
-    const switchesBeforePicker = await page.evaluate(() => window.switches.length);
-    await page.evaluate(() => {
-      window.pendingTerminalDirectory = new Promise(resolve => { window.resolveTerminalDirectory = resolve; });
-    });
-    await applyAndLaunch.click();
-    assert.ok(await applyAndLaunch.isDisabled());
-    assert.ok(await page.getByRole('button', { name: '启动 Codex CLI', exact: true }).isDisabled());
-    assert.equal(await page.evaluate(() => window.switches.length), switchesBeforePicker);
-    await page.evaluate(() => {
-      window.resolveTerminalDirectory(null);
-      window.pendingTerminalDirectory = null;
-    });
-    await page.locator('#apply-client-launch:enabled').waitFor();
-    assert.equal(await page.evaluate(() => window.switches.length), switchesBeforePicker);
+    await page.evaluate(() => { window.terminalDirectoryToPick = null; });
+    await chooseProject.click();
+    await page.locator('#choose-terminal-project:enabled').waitFor();
+    assert.ok(await projectPanel.getByText(codexProject, { exact: true }).isVisible());
+    const longProject = "/mock/Codex CLI/已选项目 '路径'/" + 'research-project-'.repeat(8);
+    await page.evaluate(directory => { window.terminalDirectoryToPick = directory; }, longProject);
+    await chooseProject.click();
+    await projectPanel.getByText(longProject, { exact: true }).waitFor();
     await applyAndLaunch.click();
     await page.getByText('Codex 配置已写入。', { exact: true }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.switches.at(-1)),
-      { client: 'codex', id: 'gpt-6.1-sol-profile', connection: 'gateway', action: 'terminal', cwd: '/mock/project', surface: 'cli' });
-    assert.equal(await page.evaluate(() => window.lastSwitchCwd), '/mock/project');
+      { client: 'codex', id: 'gpt-6.1-sol-profile', connection: 'gateway', action: 'terminal', cwd: longProject, surface: 'cli' });
+    assert.equal(await page.evaluate(() => window.lastSwitchCwd), longProject);
     await gatewayIndicator(true).waitFor();
     await capture('08-codex-switch');
     await client('Codex').click();
     assert.equal(await page.locator('#current-model').innerText(), 'gpt-6.1-sol');
+    await client('Claude Code').click();
+    assert.ok(await projectPanel.getByText(codeProject, { exact: true }).isVisible());
     await client('Codex CLI').click();
     const codexLaunches = await page.evaluate(() => window.launches.length);
     await page.locator('#client-model-picker').selectOption('fixture-codex-alt-profile');

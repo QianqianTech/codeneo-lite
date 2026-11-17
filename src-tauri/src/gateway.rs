@@ -13,8 +13,10 @@ use std::{
 pub(crate) const DEFAULT_PORT: u16 = 15733;
 const CODEX_PATH: &str = "/codex/v1";
 pub(crate) const CODEX_RESPONSES: &str = "/codex/v1/responses";
+const NO_ACTIVE_ROUTE: &str = "请先在 Claude Desktop 或 Codex 应用使用 Lite 网关的模型档案。";
 
 static PAUSED: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
+static GATEWAY_ACTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(crate) static SERVICE: LazyLock<tokio::sync::Mutex<desktop_inference::Service>> =
     LazyLock::new(|| tokio::sync::Mutex::new(desktop_inference::Service::new(PAUSED.clone())));
 
@@ -30,10 +32,6 @@ pub(crate) fn initialize_pause(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn is_paused() -> bool {
-    PAUSED.load(Ordering::SeqCst)
-}
-
 pub(crate) async fn status() -> Status {
     let service = SERVICE.lock().await;
     Status {
@@ -43,8 +41,21 @@ pub(crate) async fn status() -> Status {
 }
 
 pub(crate) async fn set_paused(paused: bool) -> Result<(), String> {
+    let _action = GATEWAY_ACTION.lock().await;
     let root = secrets::root()?;
-    SERVICE.lock().await.set_paused(&root, paused)
+    let mut service = SERVICE.lock().await;
+    if paused || service.has_active_route() {
+        return service.set_paused(&root, paused);
+    }
+    drop(service);
+
+    let restored = restore_routes().await;
+    let mut service = SERVICE.lock().await;
+    if service.has_active_route() {
+        return service.set_paused(&root, false);
+    }
+    restored?;
+    Err(NO_ACTIVE_ROUTE.into())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]

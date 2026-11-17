@@ -611,9 +611,10 @@ impl Service {
     }
 
     pub(crate) fn is_ready(&self) -> bool {
-        if self.is_paused() {
-            return false;
-        }
+        !self.is_paused() && self.has_active_route()
+    }
+
+    pub(crate) fn has_active_route(&self) -> bool {
         self.live_listener().is_some_and(|listener| {
             let codex_ready = listener
                 .codex_route
@@ -912,7 +913,7 @@ impl RequestLog {
     }
 
     fn reject_paused(&self) -> Response<Body> {
-        let reason = "CodeNeo Lite 网关已暂停。请在主窗口或托盘菜单恢复网关后重试。";
+        let reason = "CodeNeo Lite 网关已暂停。请在主窗口或托盘菜单启动网关后重试。";
         self.record("info", "本机网关", "GATEWAY_PAUSED", reason);
         non_retryable_error(StatusCode::FORBIDDEN, "permission_error", reason)
     }
