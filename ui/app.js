@@ -97,10 +97,11 @@ const lite = (() => {
   }
 
   function agentDraft(target) {
-    if (!agentDrafts.has(target.id)) {
-      agentDrafts.set(target.id, (target.models_config || []).map(item => ({ ...item })));
-    }
-    return agentDrafts.get(target.id);
+    const choices = agentDrafts.get(target.id) ?? (target.models_config || []).map(item => ({ ...item }));
+    const available = new Set(api.data.models.map(model => model.id));
+    const draft = choices.filter(choice => available.has(choice.id));
+    agentDrafts.set(target.id, draft);
+    return draft;
   }
 
   function renderAgentModels(target, available, locked) {
@@ -201,6 +202,17 @@ const lite = (() => {
   function selectProfile(clientId, id) {
     selection.set(clientId, id);
     if (modeClients.has(clientId)) switchDraft(clientId).mode = "third_party";
+  }
+
+  function forgetProfile(id) {
+    api.data.models = api.data.models.filter(model => model.id !== id);
+    api.data.in_use = api.data.in_use.filter(modelId => modelId !== id);
+    for (const [clientId, selected] of selection) {
+      if (selected === id) selection.delete(clientId);
+    }
+    const code = client("code");
+    if (code?.status.pending?.id === id) code.status.pending = null;
+    renderClients();
   }
 
   function showSavedProfile(clientId, id, text) {
@@ -717,7 +729,7 @@ const lite = (() => {
 
   const api = {
     $, invoke, element, button, option, message, errorText, confirmAction, protocols,
-    client, canApply, show, showClient, showSavedProfile, selectProfile, openClientPanel, refresh, clientAction, codeRoles,
+    client, canApply, show, showClient, showSavedProfile, selectProfile, forgetProfile, openClientPanel, refresh, clientAction, codeRoles,
     page: "clients", data: { clients: [], presets: [], accounts: [], models: [], in_use: [] },
   };
 

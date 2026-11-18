@@ -185,13 +185,15 @@ button:disabled, select:disabled, input:disabled, textarea:disabled { opacity: .
 .text-button:enabled:hover { color: var(--ink); }
 .danger:enabled { color: var(--error); }
 :where(input, select, textarea, button, summary, a, .usage-table):focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
-#confirm-dialog, #mcp-permissions-dialog {
+#confirm-dialog, #mcp-permissions-dialog, #account-key-dialog {
   width: min(360px, calc(100% - 32px)); padding: 20px;
   color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--panel-radius);
 }
-#confirm-dialog::backdrop, #mcp-permissions-dialog::backdrop { background: rgb(0 0 0 / 36%); }
+#confirm-dialog::backdrop, #mcp-permissions-dialog::backdrop, #account-key-dialog::backdrop { background: rgb(0 0 0 / 36%); }
 #confirm-dialog p { margin-block: 8px 16px; }
 #confirm-dialog .button-row { justify-content: flex-end; }
+#account-key-form { display: grid; gap: 12px; }
+#account-key-form .button-row { justify-content: flex-end; }
 .search { position: relative; display: block; min-width: 0; }
 .search input { padding-inline-start: 31px; }
 .search::before, .search::after { content: ""; position: absolute; z-index: 1; pointer-events: none; }

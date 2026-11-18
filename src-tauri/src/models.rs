@@ -208,6 +208,9 @@ pub struct Pending {
 pub struct Store {
     pub accounts: Vec<Account>,
     pub models: Vec<Model>,
+    // Profiles removed from the library can still back a client's applied configuration.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    detached_models: Vec<Model>,
     pub desktop: Option<Applied>,
     pub code: Option<Applied>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,11 +242,23 @@ pub fn write(root: &Path, old: Option<&[u8]>, store: &Store) -> Result<(), Strin
 
 impl Store {
     pub fn model(&self, id: &str) -> Result<(&Model, &Account), String> {
-        let model = self
-            .models
-            .iter()
-            .find(|model| model.id == id)
-            .ok_or("找不到模型档案")?;
+        self.with_account(self.models.iter().find(|model| model.id == id))
+    }
+
+    pub(crate) fn applied_model(&self, id: &str) -> Result<(&Model, &Account), String> {
+        self.with_account(
+            self.models
+                .iter()
+                .chain(&self.detached_models)
+                .find(|model| model.id == id),
+        )
+    }
+
+    fn with_account<'a>(
+        &'a self,
+        model: Option<&'a Model>,
+    ) -> Result<(&'a Model, &'a Account), String> {
+        let model = model.ok_or("找不到模型档案")?;
         let account = self
             .accounts
             .iter()
@@ -252,21 +267,24 @@ impl Store {
         Ok((model, account))
     }
 
-    pub fn in_use(&self) -> impl Iterator<Item = &str> {
+    fn applied_ids(&self) -> impl Iterator<Item = &str> {
         [&self.desktop, &self.code, &self.codex, &self.codex_cli]
             .into_iter()
             .flatten()
             .map(|applied| applied.id.as_str())
             .chain(
-                self.pending_code
-                    .as_ref()
-                    .and_then(|pending| pending.id.as_deref()),
-            )
-            .chain(
                 self.agents
                     .values()
                     .flat_map(|agent| agent.choices.iter().map(|choice| choice.id.as_str())),
             )
+    }
+
+    pub fn in_use(&self) -> impl Iterator<Item = &str> {
+        self.applied_ids().chain(
+            self.pending_code
+                .as_ref()
+                .and_then(|pending| pending.id.as_deref()),
+        )
     }
 }
 
@@ -315,7 +333,7 @@ fn validate_key_for_provider(account: &Account, key: &str) -> Result<(), String>
     let token_plan =
         reqwest::Url::parse(&account.base_url).is_ok_and(|url| is_aliyun_token_plan(&url));
     if token_plan && !key.strip_prefix("sk-sp-").is_some_and(|tail| !tail.is_empty()) {
-        return Err("千问 Token Plan 地址需要套餐专属 API Key（以 sk-sp- 开头）。请在模型库更新该接入账号的 Key，再重新应用档案。".into());
+        return Err("千问 Token Plan 地址需要以 sk-sp- 开头的套餐专属 API Key。请在模型库打开「修改 API Key」更新此接入账号。".into());
     }
     if account.preset == "bailian" && key.starts_with("sk-sp-") {
         return Err("请填写百炼控制台的按量 API Key。使用套餐专属 Key 时，请选择通义千问 Token Plan。".into());
@@ -878,15 +896,8 @@ pub fn save_models(
         }
     }
     let new_path = if previous_key.is_empty() || (!reuse && !input.key.trim().is_empty()) {
-        account.credential = vault::id()?;
-        let path = credential_path(root, &account.credential)?;
-        files::private_dir(path.parent().ok_or("凭据目录无效")?)?;
-        vault::write(root, &path, clear.as_bytes())?;
-        for model in &mut store.models {
-            if model.account == account.id {
-                model.checked = None;
-            }
-        }
+        let path = stage_key(root, &mut account, &clear)?;
+        clear_key_checks(&mut store, &account.id);
         Some(path)
     } else {
         None
@@ -912,6 +923,127 @@ pub fn save_models(
     Ok(ids)
 }
 
+fn stage_key(root: &Path, account: &mut Account, clear: &str) -> Result<PathBuf, String> {
+    account.credential = vault::id()?;
+    let path = credential_path(root, &account.credential)?;
+    files::private_dir(path.parent().ok_or("凭据目录无效")?)?;
+    vault::write(root, &path, clear.as_bytes())?;
+    Ok(path)
+}
+
+fn clear_key_checks(store: &mut Store, account_id: &str) {
+    for model in store
+        .models
+        .iter_mut()
+        .filter(|model| model.account == account_id)
+    {
+        model.checked = None;
+    }
+}
+
+struct KeyTargets {
+    desktop: bool,
+    codex: bool,
+}
+
+fn rekey_gateways(
+    store: &mut Store,
+    old_account: &Account,
+    account: &Account,
+    old_key: Option<String>,
+    new_key: &str,
+) -> KeyTargets {
+    let find_model = |id: &str| {
+        store
+            .models
+            .iter()
+            .chain(&store.detached_models)
+            .find(|model| model.id == id && model.account == account.id)
+    };
+    let desktop = store.desktop.as_mut().is_some_and(|applied| {
+        let (Some(selection), Some(model)) = (applied.gateway.as_mut(), find_model(&applied.id))
+        else {
+            return false;
+        };
+        if let Some(old_key) =
+            old_key.filter(|_| applied.route == client_route(Client::Desktop, model, old_account))
+        {
+            if selection.replace_supplier_key(&applied.id, account, old_key, new_key.into())
+                == Ok(true)
+            {
+                applied.route = client_route(Client::Desktop, model, account);
+            }
+        }
+        true
+    });
+    let mut codex = false;
+    for applied in [&mut store.codex, &mut store.codex_cli].into_iter().flatten() {
+        let (Some(selection), Some(model)) = (applied.codex_gateway.as_mut(), find_model(&applied.id))
+        else {
+            continue;
+        };
+        codex = true;
+        let current = route(model, old_account);
+        let updated = route(model, account);
+        if applied.route == current && selection.replace_fingerprint(&applied.id, &current, &updated) {
+            applied.route = updated;
+        }
+    }
+    KeyTargets { desktop, codex }
+}
+
+fn replace_key(root: &Path, account_id: &str, clear: &str) -> Result<Option<KeyTargets>, String> {
+    let (before, mut store) = read(root)?;
+    let index = store
+        .accounts
+        .iter()
+        .position(|account| account.id == account_id)
+        .ok_or("找不到此接入账号，请刷新模型库后重试")?;
+    let old_account = store.accounts[index].clone();
+    let clear = clear.trim();
+    validate_key(clear)?;
+    validate_key_for_provider(&old_account, clear)?;
+    let old_key = read_key(root, &old_account).ok();
+    if old_key.as_deref() == Some(clear) {
+        return Ok(None);
+    }
+    let mut updated = old_account.clone();
+    let staged_path = stage_key(root, &mut updated, clear)?;
+    let targets = rekey_gateways(&mut store, &old_account, &updated, old_key, clear);
+    store.accounts[index] = updated;
+    clear_key_checks(&mut store, account_id);
+    if let Err(error) = write(root, before.as_deref(), &store) {
+        let _ = fs::remove_file(staged_path);
+        return Err(error);
+    }
+    delete_credential(root, &old_account.credential);
+    Ok(Some(targets))
+}
+
+pub(crate) async fn update_account_key(
+    root: &Path,
+    account_id: &str,
+    clear: &str,
+) -> Result<String, String> {
+    let _lock = files::lock(root)?;
+    transaction::recover(root, &crate::clients::allowed(root))?;
+    let Some(targets) = replace_key(root, account_id, clear)? else {
+        return Ok("此接入账号已使用该 API Key，未更改。".into());
+    };
+    let mut message = String::from("新 API Key 已保存。直连客户端需重新应用此账号的模型档案。");
+    if targets.desktop {
+        if let Err(error) = crate::desktop_models::sync(root).await {
+            message.push_str(&format!(" Claude Desktop 网关未更新：{error}"));
+        }
+    }
+    if targets.codex {
+        if let Err(error) = crate::codex::sync_gateway(root).await {
+            message.push_str(&format!(" Codex 网关未更新：{error}"));
+        }
+    }
+    Ok(message)
+}
+
 fn api_id(model: &str) -> &str {
     model.strip_suffix("[1m]").unwrap_or(model)
 }
@@ -919,7 +1051,11 @@ fn api_id(model: &str) -> &str {
 fn prune_accounts(store: &mut Store) -> Vec<String> {
     let mut removed = Vec::new();
     store.accounts.retain(|account| {
-        let keep = store.models.iter().any(|model| model.account == account.id);
+        let keep = store
+            .models
+            .iter()
+            .chain(&store.detached_models)
+            .any(|model| model.account == account.id);
         if !keep {
             removed.push(account.credential.clone());
         }
@@ -936,14 +1072,49 @@ fn delete_credential(root: &Path, id: &str) {
 
 pub fn remove(root: &Path, id: &str) -> Result<(), String> {
     let _lock = files::lock(root)?;
+    transaction::recover(root, &crate::clients::allowed(root))?;
     let (before, mut store) = read(root)?;
-    if store.in_use().any(|used| used == id) {
-        return Err("此档案正在使用或等待应用，请先切换客户端或取消等待".into());
+    let Some(index) = store.models.iter().position(|model| model.id == id) else {
+        return Ok(());
+    };
+    let model = store.models.remove(index);
+    if store.applied_ids().any(|applied| applied == id) {
+        store.detached_models.push(model);
     }
-    store.model(id)?;
-    store.models.retain(|model| model.id != id);
-    let stale = prune_accounts(&mut store);
-    write(root, before.as_deref(), &store)?;
+    if store
+        .pending_code
+        .as_ref()
+        .is_some_and(|pending| pending.id.as_deref() == Some(id))
+    {
+        store.pending_code = None;
+    }
+    prune_detached(&mut store);
+    write_pruned(root, before.as_deref(), &mut store)
+}
+
+fn prune_detached(store: &mut Store) -> bool {
+    let previous = store.detached_models.len();
+    if previous == 0 {
+        return false;
+    }
+    let applied: BTreeSet<_> = store.applied_ids().map(str::to_owned).collect();
+    store
+        .detached_models
+        .retain(|model| applied.contains(&model.id));
+    store.detached_models.len() != previous
+}
+
+pub(crate) fn prune_after_switch(root: &Path) -> Result<(), String> {
+    let (before, mut store) = read(root)?;
+    if prune_detached(&mut store) {
+        write_pruned(root, before.as_deref(), &mut store)?;
+    }
+    Ok(())
+}
+
+fn write_pruned(root: &Path, before: Option<&[u8]>, store: &mut Store) -> Result<(), String> {
+    let stale = prune_accounts(store);
+    write(root, before, store)?;
     for id in stale {
         delete_credential(root, &id);
     }
@@ -1245,6 +1416,84 @@ mod tests {
             model: model.into(),
             name: String::new(),
         }
+    }
+
+    #[test]
+    fn rotating_an_account_key_preserves_models_and_refreshes_only_matching_gateway_routes() {
+        use crate::{clients::DesktopFiles, desktop, desktop_models, gateway};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let primary = save(root, input("qwen", None, QWEN4_MAX, "sk-sp-original"), None).unwrap();
+        let (_, store) = read(root).unwrap();
+        let account_id = store.model(&primary).unwrap().1.id.clone();
+        let sibling = save(
+            root,
+            input("qwen", Some(&account_id), "glm-5.3", ""),
+            None,
+        )
+        .unwrap();
+        let other = save(root, input("qwen", None, "qwen3.8-max", "sk-sp-other"), None).unwrap();
+        let (before, mut store) = read(root).unwrap();
+        let (model, account) = store.model(&primary).unwrap();
+        let old_path = credential_path(root, &account.credential).unwrap();
+        let paths = DesktopFiles::new(desktop::Locations {
+            native: root.join("Claude"),
+            gateway: root.join("Claude-3p"),
+        });
+        let (config, desktop_gateway) = desktop_models::configuration(
+            root, &paths, None, account, model, None, gateway::DEFAULT_PORT, None,
+        )
+        .unwrap();
+        fs::create_dir_all(paths.meta.parent().unwrap()).unwrap();
+        fs::write(&paths.meta, json!({"appliedId": crate::clients::OWNED}).to_string()).unwrap();
+        fs::write(&paths.owned, config.to_string()).unwrap();
+        let fingerprint = route(model, account);
+        let codex_gateway = crate::codex_inference::Selection::new(root, &primary, &fingerprint, None).unwrap();
+        let local_codex_key = codex_gateway.reference().to_owned();
+        store.desktop = Some(Applied {
+            id: primary.clone(),
+            route: client_route(Client::Desktop, model, account),
+            gateway: Some(desktop_gateway),
+            codex_gateway: None,
+        });
+        store.codex = Some(Applied {
+            id: primary.clone(),
+            route: fingerprint,
+            gateway: None,
+            codex_gateway: Some(codex_gateway),
+        });
+        store.codex_cli = store.codex.clone();
+        store.codex_cli.as_mut().unwrap().route = "stale".into();
+        for model in &mut store.models {
+            model.checked = Some(Check { healthy: true, message: "OK".into(), latency_ms: 1 });
+        }
+        write(root, before.as_deref(), &store).unwrap();
+
+        assert!(replace_key(root, &account_id, "sk-wrong-plan").is_err());
+        assert!(replace_key(root, &account_id, "   ").is_err());
+        assert!(replace_key(root, &account_id, "sk-sp-original").unwrap().is_none());
+        assert!(old_path.is_file());
+        let changed = replace_key(root, &account_id, "  sk-sp-new  ").unwrap().unwrap();
+        assert!(changed.desktop && changed.codex);
+        let (file, updated) = read(root).unwrap();
+        let (model, account) = updated.model(&primary).unwrap();
+        assert_eq!(account.id, account_id);
+        assert_eq!(key(root, account).unwrap(), "sk-sp-new");
+        assert_eq!(updated.models.len(), 3);
+        assert!(model.checked.is_none());
+        assert!(updated.model(&sibling).unwrap().0.checked.is_none());
+        let (other_model, other_account) = updated.model(&other).unwrap();
+        assert!(other_model.checked.is_some());
+        assert_eq!(key(root, other_account).unwrap(), "sk-sp-other");
+        assert!(!old_path.exists());
+        assert!(!String::from_utf8(file.unwrap()).unwrap().contains("sk-sp-new"));
+        assert_eq!(fs::read_to_string(&paths.owned).unwrap(), config.to_string());
+        assert_eq!(desktop_models::labels_for_test(root, &paths, &updated).unwrap(), [QWEN4_MAX]);
+        let selection = updated.codex.as_ref().unwrap().codex_gateway.as_ref().unwrap();
+        assert_eq!(selection.reference(), local_codex_key);
+        assert_eq!(selection.route(root, model, account).unwrap().upstream_key, "sk-sp-new");
+        assert!(updated.codex_cli.as_ref().unwrap().codex_gateway.as_ref().unwrap().route(root, model, account).is_err());
     }
 
     #[test]

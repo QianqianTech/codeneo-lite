@@ -915,7 +915,7 @@ impl RequestLog {
     fn reject_paused(&self) -> Response<Body> {
         let reason = "CodeNeo Lite 网关已暂停。请在主窗口或托盘菜单启动网关后重试。";
         self.record("info", "本机网关", "GATEWAY_PAUSED", reason);
-        non_retryable_error(StatusCode::FORBIDDEN, "permission_error", reason)
+        non_retryable_error(StatusCode::SERVICE_UNAVAILABLE, "api_error", reason)
     }
 }
 
@@ -1358,7 +1358,7 @@ async fn upstream_error(mut response: reqwest::Response, log: &RequestLog) -> Re
         return non_retryable_error(
             status,
             "authentication_error",
-            "第三方供应商拒绝了 API Key（HTTP 401）。请在 CodeNeo Lite 的「模型库」核对接入账号的 Key 和服务地址，保存后重新应用档案。",
+            "第三方供应商拒绝了 API Key（HTTP 401）。请在 CodeNeo Lite 的「模型库」核对服务地址，打开「修改 API Key」更新接入账号后重试。",
         );
     }
     if let Some(message) = read_kimi_concurrency_error(&mut response).await {
@@ -1995,9 +1995,11 @@ mod tests {
             desktop_call("/v1/messages/count_tokens"),
         ] {
             let response = request.send().await.unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(response.headers()["x-should-retry"], "false");
-            assert!(response.text().await.unwrap().contains("网关已暂停"));
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["type"], "api_error");
+            assert!(body["error"]["message"].as_str().unwrap().contains("网关已暂停"));
         }
         gate.notify_one();
         assert!(old.text().await.unwrap().contains("response.completed"));

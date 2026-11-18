@@ -295,7 +295,7 @@ impl ClientView {
     }
     pub(crate) fn applied(&mut self, client: Client, store: &Store, applied: Option<&Applied>) {
         let Some(applied) = applied else { return };
-        if let Ok((model, account)) = store.model(&applied.id) {
+        if let Ok((model, account)) = store.applied_model(&applied.id) {
             self.state = "lite";
             self.account = account.name.clone();
             self.selected = Some(model.id.clone());
@@ -387,7 +387,7 @@ fn desktop_view(store: &Store, paths: &DesktopFiles) -> Result<ClientView, Strin
             && store
                 .desktop
                 .as_ref()
-                .and_then(|applied| store.model(&applied.id).ok())
+                .and_then(|applied| store.applied_model(&applied.id).ok())
                 .is_some_and(|(model, _)| !desktop_models::supports_direct(model))
         {
             view.issue = Some("重新应用档案，Claude Desktop 将通过 Lite 网关加载模型列表。".into());
@@ -433,7 +433,7 @@ fn code_view(root: &Path, store: &Store, path: &Path) -> Result<ClientView, Stri
         }
     }
     if let Some(applied) = &store.code {
-        if let Ok((model, account)) = store.model(&applied.id) {
+        if let Ok((model, account)) = store.applied_model(&applied.id) {
             if base == Some(account.base_for(models::Protocol::Anthropic))
                 && active == models::code_model(model, account)
             {
@@ -519,7 +519,7 @@ pub fn view(root: &Path) -> Result<Value, String> {
                 _ => crate::agents::view(root, &store, client),
             }
             .unwrap_or_else(ClientView::unavailable);
-            status.can_undo = transaction::can_undo(root, client);
+            status.can_undo = transaction::can_undo(root, client, &store);
             if client == Client::Code {
                 status.pending = store.pending_code.as_ref().map(|pending| PendingView {
                     id: pending.id.clone(),
@@ -528,7 +528,12 @@ pub fn view(root: &Path) -> Result<Value, String> {
             }
             let spec = crate::agents::spec(client);
             let configured = store.agents.get(&client).map(|selection| {
-                selection.choices.iter().map(|choice| json!({"id":choice.id,"context":choice.context})).collect::<Vec<_>>()
+                selection
+                    .choices
+                    .iter()
+                    .filter(|choice| store.model(&choice.id).is_ok())
+                    .map(|choice| json!({"id":choice.id,"context":choice.context}))
+                    .collect::<Vec<_>>()
             });
             let mut entry = json!({"id": client, "name": client.name(), "protocol": spec.protocols.first(),
             "protocols": spec.protocols, "agent": crate::agents::is_added(client),
@@ -584,9 +589,13 @@ pub fn view(root: &Path) -> Result<Value, String> {
             "desktop_direct": clients.contains(&Client::Desktop) && desktop_models::supports_direct(model)}))
         })
         .collect();
+    let in_use: Vec<_> = store
+        .in_use()
+        .filter(|id| store.model(id).is_ok())
+        .collect();
     Ok(
         json!({"clients": clients, "presets": models::presets(), "accounts": accounts,
-        "models": saved, "in_use": store.in_use().collect::<Vec<_>>() }),
+        "models": saved, "in_use": in_use }),
     )
 }
 
@@ -1067,12 +1076,16 @@ fn switch_client(root: &Path, client: Client, id: Option<&str>) -> Result<Outcom
                 if let Some(previous) = active.choices.iter().find(|choice| choice.id == id) {
                     choices[0].context = previous.context;
                 }
-                choices.extend(active.choices.iter().filter(|choice| choice.id != id).map(
-                    |choice| crate::agents::RequestedModel {
-                        id: choice.id.clone(),
-                        context: choice.context,
-                    },
-                ));
+                choices.extend(
+                    active
+                        .choices
+                        .iter()
+                        .filter(|choice| choice.id != id && store.model(&choice.id).is_ok())
+                        .map(|choice| crate::agents::RequestedModel {
+                            id: choice.id.clone(),
+                            context: choice.context,
+                        }),
+                );
             }
             crate::agents::apply(root, client, &store, choices)
         }
@@ -1263,15 +1276,13 @@ mod tests {
     fn pending_code_configuration_blocks_a_new_code_terminal() {
         let root = tempfile::tempdir().unwrap();
         let _lock = files::lock(root.path()).unwrap();
-        let store = Store {
-            pending_code: Some(Pending {
-                id: None,
-                route: None,
-                config: "fixture".into(),
-                issue: None,
-            }),
-            ..Store::default()
-        };
+        let mut store = Store::default();
+        store.pending_code = Some(Pending {
+            id: None,
+            route: None,
+            config: "fixture".into(),
+            issue: None,
+        });
         models::write(root.path(), None, &store).unwrap();
         assert!(check_launch(root.path(), Client::Code)
             .unwrap_err()
@@ -1310,8 +1321,8 @@ mod tests {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
-    #[test]
-    fn overview_hides_profiles_until_their_account_has_a_readable_key() {
+    #[tokio::test]
+    async fn overview_hides_profiles_until_their_account_has_a_readable_key() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let first = save_model(root, "deepseek-flash", None);
@@ -1340,20 +1351,10 @@ mod tests {
         fs::write(models::path(root), serde_json::to_vec(&stored).unwrap()).unwrap();
         assert_eq!(view(root).unwrap()["models"], json!([]));
 
-        let repaired = models::save(
-            root,
-            serde_json::from_value(json!({
-                "account_id": account, "preset": "deepseek", "account_name": "",
-                "base_url": "", "auth": "auth_token", "name": "", "model": "deepseek-flash",
-                "key": "replacement-fixture-key"
-            }))
-            .unwrap(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(repaired, first);
+        models::update_account_key(root, &account, "replacement-fixture-key").await.unwrap();
         let repaired = view(root).unwrap();
         assert_eq!(repaired["accounts"][0]["has_key"], true);
+        assert_eq!(repaired["models"][0]["id"], first);
         assert_eq!(repaired["models"][1]["id"], second);
         assert_eq!(repaired["models"].as_array().unwrap().len(), 2);
     }
@@ -1422,6 +1423,60 @@ mod tests {
         assert!(!fs::read_to_string(models::path(&root))
             .unwrap()
             .contains("fixture-supplier-key"));
+    }
+
+    #[test]
+    fn deleting_code_profiles_cancels_only_the_removed_pending_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("lite");
+        let code = temp.path().join("settings.json");
+        let first = save_model(&root, "deepseek-flash", None);
+        let next = save_model(&root, "deepseek-v4-pro", None);
+        let paths = [code.clone(), models::path(&root)];
+        let (_, store) = models::read(&root).unwrap();
+        let deltas = plan_code(&root, &code, &store, Some(&first), &Default::default()).unwrap();
+        transaction::commit(&root, Client::Code, deltas, &paths).unwrap();
+        let (before, mut store) = models::read(&root).unwrap();
+        store.pending_code = Some(Pending {
+            id: Some(next.clone()),
+            route: selection(&store, Client::Code, Some(&next))
+                .unwrap()
+                .map(|applied| applied.route),
+            config: code_fingerprint(&code).unwrap(),
+            issue: None,
+        });
+        models::write(&root, before.as_deref(), &store).unwrap();
+
+        models::remove(&root, &first).unwrap();
+        let (_, store) = models::read(&root).unwrap();
+        assert!(store.model(&first).is_err());
+        assert_eq!(
+            store.pending_code.unwrap().id.as_deref(),
+            Some(next.as_str())
+        );
+        models::remove(&root, &next).unwrap();
+        models::remove(&root, &next).unwrap();
+        let (_, store) = models::read(&root).unwrap();
+        assert!(store.models.is_empty());
+        assert!(store.pending_code.is_none());
+        assert!(check_launch(&root, Client::Code).is_ok());
+        assert_eq!(
+            code_view(&root, &store, &code).unwrap().selected.as_deref(),
+            Some(first.as_str())
+        );
+
+        let deltas = plan_code(&root, &code, &store, None, &Default::default()).unwrap();
+        transaction::commit(&root, Client::Code, deltas, &paths).unwrap();
+        let (_, store) = models::read(&root).unwrap();
+        assert!(store.applied_model(&first).is_err());
+        assert!(store.accounts.is_empty());
+        assert!(fs::read_dir(root.join("model-credentials"))
+            .unwrap()
+            .next()
+            .is_none());
+        assert!(!transaction::can_undo(&root, Client::Code, &store));
+        assert!(transaction::undo(&root, Client::Code, &paths).is_err());
+        assert_eq!(code_view(&root, &store, &code).unwrap().state, "official");
     }
 
     #[test]
@@ -1691,6 +1746,13 @@ mod tests {
         );
         transaction::undo(&root, Client::Desktop, &files).unwrap();
         let (_, store) = models::read(&root).unwrap();
+        assert_eq!(
+            desktop_models::labels_for_test(&root, &paths, &store).unwrap(),
+            before
+        );
+        models::remove(&root, &id).unwrap();
+        let (_, store) = models::read(&root).unwrap();
+        assert!(store.models.is_empty());
         assert_eq!(
             desktop_models::labels_for_test(&root, &paths, &store).unwrap(),
             before

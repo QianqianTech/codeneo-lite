@@ -11,6 +11,10 @@
   const providerIndex = $("library-providers");
   const providerPicker = $("library-provider");
   const modelTabs = document.querySelectorAll("[data-model-tab]");
+  const keyDialog = $("account-key-dialog");
+  const keyAccount = $("key-account-picker");
+  const keyInput = $("new-account-key");
+  const keyFeedback = $("account-key-feedback");
   const emptyFilters = () => ({ query: "", target: "", provider: "" });
   const filters = { catalog: emptyFilters(), saved: emptyFilters() };
   const expandedProviders = new Set();
@@ -34,6 +38,8 @@
   let candidateLimit = catalogPageSize;
   let source = "preset";
   let partial = false;
+  let keySaving = false;
+  let keyOpener = "";
 
   function accountFor(model) {
     return lite.data.accounts.find(account => account.id === model.account);
@@ -123,6 +129,50 @@
     $("model-search").focus();
   }
 
+  function openKeyEditor(accounts, opener) {
+    if (!invoke || !accounts.length || keyDialog.open) return;
+    const choices = accounts.map((account, index) => {
+      const names = lite.data.models.filter(model => model.account === account.id).slice(0, 2).map(model => model.name);
+      const label = [account.name, ...names].filter(Boolean).join(" · ");
+      return option(accounts.length > 1 ? `${index + 1}. ${label}` : account.name, account.id);
+    });
+    keyOpener = opener.id;
+    keyAccount.replaceChildren(...(choices.length > 1 ? [option("选择接入账号", ""), ...choices] : choices));
+    keyInput.value = "";
+    message(keyFeedback, "");
+    keyEditorControls();
+    keyDialog.showModal();
+    (choices.length > 1 ? keyAccount : keyInput).focus();
+  }
+
+  function keyEditorControls() {
+    keyAccount.disabled = keySaving || keyAccount.options.length === 1;
+    keyInput.disabled = keySaving;
+    $("close-account-key").disabled = keySaving;
+    $("save-account-key").disabled = keySaving || !keyAccount.value || !keyInput.value.trim();
+    $("account-key-form").setAttribute("aria-busy", String(keySaving));
+  }
+
+  async function saveAccountKey(event) {
+    event.preventDefault();
+    if (!keyDialog.open || $("save-account-key").disabled) return;
+    keySaving = true;
+    keyEditorControls();
+    message(keyFeedback, "pending", "正在保存新 Key…");
+    try {
+      const result = await invoke("update_account_key", { accountId: keyAccount.value, key: keyInput.value });
+      keyInput.value = "";
+      keyDialog.close();
+      message($("models-feedback"), "success", result);
+      void lite.refresh();
+    } catch (error) {
+      message(keyFeedback, "error", errorText(error));
+    } finally {
+      keySaving = false;
+      keyEditorControls();
+    }
+  }
+
   function providerPanel({ id: provider, name, preset, models, clients }, target) {
     const panel = element("article", "provider-panel");
     const heading = element("header", "provider-heading");
@@ -132,6 +182,11 @@
     const actions = element("div", "provider-actions");
     heading.append(title, actions);
     panel.append(heading);
+    const editKey = button("修改 API Key", event => openKeyEditor(
+      lite.data.accounts.filter(account => providerId(account) === provider), event.currentTarget,
+    ), "secondary");
+    editKey.id = `edit-provider-key:${provider}`;
+    editKey.setAttribute("aria-label", `修改 ${name} 的 API Key`);
     if (preset) {
       const load = button("拉取模型", event => openEditor({
         target, preset: preset.id, fetchCatalog: true, opener: event.currentTarget,
@@ -140,6 +195,7 @@
       load.setAttribute("aria-label", `拉取 ${name} 模型`);
       actions.append(load);
     }
+    actions.append(editKey);
     const supported = clientNames([...clients]);
     if (supported) {
       const capabilities = element("p", "provider-capabilities", supported);
@@ -186,7 +242,10 @@
 
   async function removeModel(model, control) {
     if (removingModels.has(model.id)) return;
-    const confirmed = await lite.confirmAction(`删除「${model.name}」？`, "将从模型库移除此档案。", "确认删除");
+    const description = lite.data.in_use.includes(model.id)
+      ? "将从模型库移除此档案。客户端当前连接可继续使用到下次切换。等待应用此档案的任务会取消。"
+      : "将从模型库移除此档案。";
+    const confirmed = await lite.confirmAction(`删除「${model.name}」？`, description, "确认删除");
     if (!confirmed) return;
     removingModels.add(model.id);
     control.disabled = true;
@@ -194,7 +253,7 @@
     message(feedback, "pending", "正在删除档案…");
     try {
       await invoke("remove_model", { id: model.id });
-      lite.data.models = lite.data.models.filter(item => item.id !== model.id);
+      lite.forgetProfile(model.id);
       syncFilters();
       message(feedback, "success", "模型档案已删除。");
       void lite.refresh();
@@ -259,11 +318,12 @@
     if (client) use.title = `在 ${client.name} 中选用`;
     const edit = button("编辑", event => openEditor({ model, opener: event.currentTarget }), "secondary");
     edit.id = `edit-model:${model.id}`;
+    const editKey = button("修改 API Key", event => openKeyEditor([account], event.currentTarget), "secondary");
+    editKey.id = `edit-model-key:${model.id}`;
     const remove = button("删除", event => removeModel(model, event.currentTarget), "text-button danger");
-    remove.disabled = used || removingModels.has(model.id);
-    if (used) remove.title = "模型正在使用或等待应用";
-    for (const action of [use, edit, remove]) action.setAttribute("aria-describedby", heading.id);
-    actions.append(use, edit, remove);
+    remove.disabled = !invoke || removingModels.has(model.id);
+    for (const action of [use, edit, editKey, remove]) action.setAttribute("aria-describedby", heading.id);
+    actions.append(use, edit, editKey, remove);
     row.append(content, actions);
     return row;
   }
@@ -290,6 +350,7 @@
     $("saved-count").textContent = String(configured);
     $("saved-count").title = `${configured} 个已配置模型`;
     $("new-model").disabled = !invoke || busy || !ready;
+    $("repair-account-key").hidden = !lite.data.accounts.some(account => !account.has_key);
     $("open-model-switch").disabled = !lite.data.clients.length;
     $("library-provider-index").hidden = !directory || !providerGroups.length;
     $("clear-library-filters").hidden = !query && !target && !provider;
@@ -637,7 +698,7 @@
     $("provider-key").value = "";
     $("provider-key").placeholder = account?.has_key ? "使用已保存的 Key" : "粘贴从服务商获取的 Key";
     $("provider-key-help").textContent = account?.has_key
-      ? "留空继续使用已保存的 Key。填写新 Key 会更新该接入账号。"
+      ? "留空继续使用已保存的 Key。如需单独更换，请使用模型库中的「修改 API Key」。"
       : presetId === "qwen" ? "请从千问 Token Plan 订阅页复制以 sk-sp- 开头的专属 API Key。"
         : account ? "请为此接入账号重新填写 API Key。"
         : preset ? `在 ${preset.name} 的控制台创建或复制 API Key。` : "先选一个服务商，再粘贴它提供的 API Key。";
@@ -883,6 +944,26 @@
   window.addEventListener("lite:refresh", () => { syncFilters(); renderLibrary(); });
   window.addEventListener("lite:refresh-error", () => { if (!lite.data.presets.length) renderLibrary(); });
   window.addEventListener("lite:new-model", event => openEditor({ ...event.detail, fromClient: true }));
+  $("repair-account-key").addEventListener("click", event => openKeyEditor(
+    lite.data.accounts.filter(account => !account.has_key), event.currentTarget,
+  ));
+  $("account-key-form").addEventListener("submit", saveAccountKey);
+  $("close-account-key").addEventListener("click", () => keyDialog.close());
+  keyAccount.addEventListener("change", () => {
+    keyInput.value = "";
+    message(keyFeedback, "");
+    keyEditorControls();
+  });
+  keyInput.addEventListener("input", () => {
+    message(keyFeedback, "");
+    keyEditorControls();
+  });
+  keyDialog.addEventListener("cancel", event => { if (keySaving) event.preventDefault(); });
+  keyDialog.addEventListener("close", () => {
+    keyInput.value = "";
+    const opener = $(keyOpener);
+    (opener && !opener.hidden ? opener : $("models-title")).focus({ preventScroll: true });
+  });
   $("new-model").addEventListener("click", event => openNewModel(event.currentTarget));
   $("close-model").addEventListener("click", () => closeEditor(true));
   $("provider-picker").addEventListener("change", () => {

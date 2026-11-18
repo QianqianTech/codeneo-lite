@@ -31,6 +31,37 @@ impl Selection {
     pub(crate) fn port(&self) -> u16 {
         self.port.unwrap_or(gateway::DEFAULT_PORT)
     }
+
+    fn inference_route(
+        &self,
+        id: &str,
+        account: &models::Account,
+        key: String,
+    ) -> Result<Arc<desktop_inference::Route>, String> {
+        route(
+            account,
+            key,
+            &self.models,
+            self.scoped_model_ids.then_some(id),
+            self.picker_metadata,
+            self.effort_catalog.clone(),
+        )
+    }
+
+    pub(crate) fn replace_supplier_key(
+        &mut self,
+        id: &str,
+        account: &models::Account,
+        old_key: String,
+        new_key: String,
+    ) -> Result<bool, String> {
+        if self.inference_route(id, account, old_key)?.supplier_fingerprint() != self.supplier {
+            return Ok(false);
+        }
+        self.supplier = self.inference_route(id, account, new_key)?.supplier_fingerprint();
+        self.allow_history = false;
+        Ok(true)
+    }
 }
 
 pub(crate) fn model_names(model: &models::Model) -> Result<Vec<String>, String> {
@@ -207,14 +238,11 @@ fn applied_route(
             Ok(None)
         };
     };
-    let (_, account) = store.model(&applied.id)?;
-    let route = route(
+    let (_, account) = store.applied_model(&applied.id)?;
+    let route = selection.inference_route(
+        &applied.id,
         account,
         models::key(root, account)?,
-        &selection.models,
-        selection.scoped_model_ids.then_some(applied.id.as_str()),
-        selection.picker_metadata,
-        selection.effort_catalog.clone(),
     )?;
     if route.supplier_fingerprint() != selection.supplier {
         return Err("已应用的模型服务商或 API Key 已更新，请重新应用档案。".into());

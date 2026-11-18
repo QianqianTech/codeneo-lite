@@ -499,7 +499,7 @@ fn routes<'a>(
     choices
         .iter()
         .map(|choice| {
-            let (saved, account) = store.model(&choice.id)?;
+            let (saved, account) = store.applied_model(&choice.id)?;
             models::require_model(client, saved, account)?;
             if models::route(saved, account) != choice.route {
                 return Err("模型或凭据已更新，请在 Lite 重新应用后启动".into());
@@ -925,7 +925,7 @@ fn apply_at(
         .into_iter()
         .flat_map(|selection| &selection.choices)
         .filter_map(|choice| {
-            let (saved, account) = store.model(&choice.id).ok()?;
+            let (saved, account) = store.applied_model(&choice.id).ok()?;
             route(client, saved, account, choice.context)
                 .ok()
                 .map(|route| route.selection_id(client))
@@ -1032,7 +1032,7 @@ pub fn view(root: &Path, store: &Store, client: Client) -> Result<ClientView, St
             .choices
             .iter()
             .filter_map(|choice| {
-                store.model(&choice.id).ok().and_then(|(saved, _)| {
+                store.applied_model(&choice.id).ok().and_then(|(saved, _)| {
                     crate::model_transport::provider_api_model(&saved.model).ok()
                 })
             })
@@ -1210,7 +1210,24 @@ mod tests {
         );
         assert!(read().get(Some("mcpServers"), "added").unwrap().is_some());
         transaction::undo_mcp(root, Qwen, None, &config).unwrap();
+        let mut native = read();
+        native
+            .set(Some("model"), "name", Some(json!("fixture-b")))
+            .unwrap();
+        transaction::write_single(native).unwrap();
+        models::remove(root, &ids[1]).unwrap();
+        let (_, store) = models::read(root).unwrap();
+        assert!(store.model(&ids[1]).is_err());
+        assert_eq!(
+            routes(Qwen, &store, &store.agents[&Qwen].choices)
+                .unwrap()
+                .len(),
+            2
+        );
         apply(&[]);
+        let (_, store) = models::read(root).unwrap();
+        assert!(store.applied_model(&ids[1]).is_err());
+        assert!(store.model(&ids[0]).is_ok());
         let plan = read();
         assert_eq!(
             plan.get(Some("model"), "name").unwrap(),

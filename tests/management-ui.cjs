@@ -53,6 +53,7 @@ async function main() {
         clients[1].status = { ...official, state: 'lite', selected: 'k3.1-pro-profile',
           model: 'k3.1-pro', code_efforts: levels };
       };
+      window.queueCodeSwitch = id => { clients[1].status.pending = { id, issue: null }; };
       window.switches = [];
       window.gatewayAvailable = true;
       window.gatewayPaused = false;
@@ -73,12 +74,17 @@ async function main() {
       ].map(([id, name, base_url, models, clients]) => ({ id, provider: id, name, base_url, auth: 'auth_token',
         protocols: id === 'openai' ? ['responses', 'chat_completions'] : ['anthropic'], models, clients }));
       const view = {
-        clients, presets, in_use: [],
+        clients, presets,
         accounts: [{ id: 'missing-key', provider: 'deepseek', preset: 'deepseek', name: '待补 Key 的账号',
           has_key: false, clients: ['desktop', 'workbuddy'] }],
         models: [{ id: 'missing-key-profile', account: 'missing-key', name: '待补 Key 的模型',
           model: 'deepseek-flash', clients: ['desktop', 'workbuddy'] }],
       };
+      window.keyChanges = [];
+      window.addKeyAccount = () => {
+        view.accounts.push({ ...view.accounts.find(item => item.id === 'kimi-account'), id: 'kimi-secondary', name: 'Kimi 备用接入' });
+      };
+      window.removeKeyAccount = () => { view.accounts = view.accounts.filter(item => item.id !== 'kimi-secondary'); };
       window.prepareLongModel = () => {
         const preset = presets.find(item => item.id === 'openrouter');
         view.accounts.push({ ...preset, id: 'openrouter-account', preset: preset.id, has_key: true });
@@ -105,7 +111,10 @@ async function main() {
         const client = clients.find(client => client.id === args?.client);
         if (command === 'lite_overview') {
           if (window.pendingOverview) await window.pendingOverview;
-          return structuredClone(view);
+          const inUse = clients.flatMap(({ status, models_config }) => [
+            status.selected, status.pending?.id, ...(models_config || []).map(item => item.id),
+          ]);
+          return structuredClone({ ...view, in_use: inUse.filter(id => view.models.some(model => model.id === id)) });
         }
         if (command === 'lite_gateway_status') return {
           paused: window.gatewayPaused,
@@ -144,7 +153,6 @@ async function main() {
           const desktopRestart = client.id === 'desktop' && args.action === 'restart';
           const restarted = '配置已应用。Claude Desktop 已重启。';
           if (args.id === null) {
-            view.in_use = view.in_use.filter(id => id !== client.status.selected);
             client.status = { ...official, account: client.id === 'codex' ? 'OpenAI 官方' : official.account, can_undo: true };
             if (desktopRestart) window.launches.push([client.id, 'apply', null, args.action]);
             return desktopRestart ? restarted : client.name + ' 已切回官方模式。';
@@ -154,10 +162,8 @@ async function main() {
           const local = args.connection === 'gateway';
           const hot = local && client.status.local_gateway && !args.action;
           const models = client.id === 'desktop' && local && model.desktop_models?.length ? model.desktop_models : [model.model];
-          view.in_use = view.in_use.filter(id => id !== client.status.selected);
           client.status = { ...official, state: 'lite', account: '测试服务商', model: models[0], models,
             selected: model.id, can_undo: true, local_gateway: local, gateway_ready: local };
-          view.in_use.push(model.id);
           if (args.action) window.launches.push([client.id, 'apply', model.id, args.action]);
           if (hot) return `${client.name} 网关已切换模型。`;
           return desktopRestart ? restarted : client.name + ' 配置已写入。';
@@ -189,6 +195,13 @@ async function main() {
           if (args.client !== 'desktop') throw '错误的客户端';
           window.probedModel = args.input.model;
           return { healthy: true, message: '模型调用通过', latency_ms: 42 };
+        }
+        if (command === 'update_account_key') {
+          const account = view.accounts.find(item => item.id === args.accountId);
+          if (!account || args.key !== 'fixture-new-key') throw '请填写有效的模型 API Key';
+          window.keyChanges.push(account.id);
+          account.has_key = true;
+          return '新 API Key 已保存。直连客户端需重新应用此账号的模型档案。';
         }
         if (command === 'save_model' || command === 'save_models') {
           const preset = presets.find(item => item.id === args.input.preset);
@@ -229,8 +242,9 @@ async function main() {
           return { message: `已向 WorkBuddy 添加 ${args.ids.length} 个模型。` };
         }
         if (command === 'remove_model') {
-          if (view.in_use.includes(args.id)) throw '模型正在使用';
           view.models = view.models.filter(model => model.id !== args.id);
+          const code = clients.find(client => client.id === 'code');
+          if (code.status.pending?.id === args.id) code.status.pending = null;
           return null;
         }
         if (command === 'apply_model') {
@@ -246,11 +260,9 @@ async function main() {
           }
           client.status = { state: 'lite', account: '测试服务商', model: model.desktop_models?.[0] || model.model,
             models: model.desktop_models, local_gateway: !!model.desktop_models?.length, selected: model.id, can_undo: true };
-          view.in_use.push(model.id);
           return { message: client.name + ' 配置已写入。' };
         }
         if (command === 'undo_model') {
-          view.in_use = view.in_use.filter(id => id !== client.status.selected);
           client.status = { ...official };
           return { message: '已撤销上次 Desktop 切换。' };
         }
@@ -442,11 +454,24 @@ async function main() {
     const libraryProvider = page.getByLabel('筛选服务商');
     const catalogTab = page.getByRole('button', { name: '模型目录', exact: true });
     const savedTab = page.getByRole('button', { name: /^已配置/ });
+    const keyEditor = page.getByRole('dialog', { name: '修改 API Key', exact: true });
+    const newKey = keyEditor.getByLabel('新 API Key', { exact: true });
+    const keyAccount = keyEditor.getByLabel('接入账号', { exact: true });
+    const saveNewKey = keyEditor.getByRole('button', { name: '保存新 Key', exact: true });
     await page.getByRole('heading', { name: '还没有配置模型' }).waitFor();
     await capture('02-library');
     assert.equal(await page.locator('#library-summary').innerText(), '0 个已配置模型');
     assert.equal(await page.locator('.provider-panel, .provider-model').count(), 0);
     assert.equal(await page.locator('#saved-count').innerText(), '0');
+    await page.getByRole('button', { name: '补填 API Key', exact: true }).click();
+    assert.equal(await keyAccount.inputValue(), 'missing-key');
+    assert.equal(await newKey.inputValue(), '');
+    assert.ok(await saveNewKey.isDisabled());
+    await newKey.fill('fixture-unsaved');
+    await newKey.press('Escape');
+    await keyEditor.waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => document.getElementById('new-account-key').value === '');
+    assert.deepEqual(await page.evaluate(() => window.keyChanges), []);
     assert.equal(await modelSearch.evaluate(input => input.getBoundingClientRect().height),
       await libraryClient.evaluate(select => select.getBoundingClientRect().height));
     await savedTab.click();
@@ -577,8 +602,16 @@ async function main() {
     await page.getByRole('heading', { name: 'Kimi 工作档' }).waitFor();
     assert.equal(await page.locator('#saved-count').innerText(), '2');
     await page.locator('.saved-profile-models').getByText('k3', { exact: true }).waitFor();
-    assert.ok(await page.getByRole('button', { name: '删除', exact: true }).isDisabled());
+    assert.ok(await page.getByRole('button', { name: '删除', exact: true }).isEnabled());
     await page.getByText('使用中', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '修改 API Key', exact: true }).click();
+    assert.equal(await keyAccount.inputValue(), 'kimi-account');
+    assert.equal(await newKey.getAttribute('type'), 'password');
+    assert.equal(await newKey.inputValue(), '');
+    await newKey.fill('fixture-invalid');
+    await saveNewKey.click();
+    await keyEditor.getByText('请填写有效的模型 API Key', { exact: true }).waitFor();
+    await keyEditor.getByRole('button', { name: '取消', exact: true }).click();
     await libraryProvider.selectOption('kimi');
     await modelSearch.fill('Kimi 工作档');
     assert.equal(await page.locator('.saved-model').count(), 1);
@@ -594,6 +627,20 @@ async function main() {
     assert.equal(await page.locator('#library-summary').innerText(), '2 个已配置模型');
     assert.deepEqual(await page.locator('.provider-model code').allTextContents(), ['k3.1-pro', 'k3']);
     assert.equal(await provider('DeepSeek').count(), 0);
+    await page.evaluate(async () => { window.addKeyAccount(); await lite.refresh(); });
+    await provider('Kimi Code').getByRole('button', { name: '修改 Kimi Code 的 API Key', exact: true }).click();
+    assert.equal(await keyAccount.inputValue(), '');
+    assert.equal(await newKey.inputValue(), '');
+    await newKey.fill('fixture-unsaved');
+    assert.ok(await saveNewKey.isDisabled());
+    await keyAccount.selectOption('kimi-secondary');
+    assert.equal(await newKey.inputValue(), '');
+    await newKey.fill('fixture-new-key');
+    await saveNewKey.click();
+    await page.locator('#models-feedback').getByText('新 API Key 已保存。直连客户端需重新应用此账号的模型档案。', { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.keyChanges), ['kimi-secondary']);
+    assert.deepEqual(await page.locator('.provider-model code').allTextContents(), ['k3.1-pro', 'k3']);
+    await page.evaluate(async () => { window.removeKeyAccount(); await lite.refresh(); });
     const compatibility = provider('Kimi Code').getByRole('button', { name: '兼容客户端' });
     await compatibility.click();
     await provider('Kimi Code').getByText('Claude Desktop · Claude Code', { exact: true }).waitFor();
@@ -661,7 +708,7 @@ async function main() {
     await savedTab.click();
     await modelSearch.fill('k3');
     const kimiProfile = page.locator('.saved-model').filter({ has: page.getByRole('heading', { name: 'Kimi 工作档', exact: true }) });
-    assert.ok(await kimiProfile.getByRole('button', { name: '删除', exact: true }).isDisabled());
+    assert.ok(await kimiProfile.getByRole('button', { name: '删除', exact: true }).isEnabled());
     await standaloneK3.getByRole('button', { name: '删除', exact: true }).click();
     await page.getByRole('dialog', { name: '删除「k3」？', exact: true })
       .getByRole('button', { name: '确认删除', exact: true }).click();
@@ -1242,6 +1289,48 @@ async function main() {
       { client: 'desktop', id: 'deepseek-v4-pro-profile', connection: 'gateway', action: null });
     assert.equal(await page.evaluate(() => window.launches.length), desktopLaunches);
     assert.equal(await page.locator('#client-after-apply').isVisible(), false);
+
+    const removeProfile = async (id, status) => {
+      const card = page.locator('.saved-model').filter({ has: page.locator(`[id="saved-model:${id}"]`) });
+      await card.getByText(status, { exact: true }).waitFor();
+      await card.getByRole('button', { name: '删除', exact: true }).click();
+      const dialog = page.locator('#confirm-dialog');
+      await dialog.getByText(/等待应用此档案的任务会取消/).waitFor();
+      await dialog.getByRole('button', { name: '确认删除', exact: true }).click();
+      await card.waitFor({ state: 'detached' });
+      await page.getByText('模型档案已删除。', { exact: true }).waitFor();
+    };
+    await nav('模型库').click();
+    await savedTab.click();
+    await removeProfile('deepseek-v4-pro-profile', '使用中');
+    await nav('客户端').click();
+    assert.equal(await page.locator('#current-model').innerText(), 'deepseek-v4-pro');
+    const picker = page.locator('#client-model-picker');
+    assert.equal(await picker.locator('option[value="deepseek-v4-pro-profile"]').count(), 0);
+    await picker.selectOption('k3.1-pro-profile');
+    await page.locator('#apply-model.primary').click();
+    await page.getByText('Claude Desktop 网关已切换模型。', { exact: true }).waitFor();
+    assert.equal(await page.locator('#current-model').innerText(), 'k3.1-pro');
+
+    await page.evaluate(async () => {
+      window.queueCodeSwitch('deepseek-flash-profile');
+      await lite.refresh();
+    });
+    await nav('模型库').click();
+    await removeProfile('deepseek-flash-profile', '等待应用');
+    await nav('客户端').click();
+    await client('Claude Code').click();
+    assert.equal(await page.locator('#client-pending').isVisible(), false);
+    assert.ok(await launchCode.isEnabled());
+
+    await client('Qwen Code').click();
+    assert.ok(await page.getByRole('checkbox', { name: /Fixture B/ }).isChecked());
+    await nav('模型库').click();
+    await removeProfile('qb', '使用中');
+    await nav('客户端').click();
+    await page.getByRole('button', { name: '应用模型列表' }).click();
+    await page.getByText('已应用模型列表。', { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.appliedAgentModels), ['qa']);
 
     assert.deepEqual(errors, []);
     console.log('codeneo-lite UI: model library filters, model setup and undo, native launch, MCP edit and verification, usage, and narrow layout passed.');

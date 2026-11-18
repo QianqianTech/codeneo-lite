@@ -1,4 +1,4 @@
-use crate::{files, vault};
+use crate::{files, models, vault};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -539,6 +539,8 @@ pub fn commit(
     deltas: Vec<Delta>,
     paths: &[PathBuf],
 ) -> Result<(), String> {
+    let state = models::path(root);
+    let updates_models = deltas.iter().any(|delta| delta.at(&state));
     commit_at(
         root,
         client,
@@ -546,7 +548,13 @@ pub fn commit(
         paths,
         &pending_file(root),
         &client.backup(root),
-    )
+    )?;
+    if updates_models {
+        if let Err(error) = models::prune_after_switch(root) {
+            claudekeeper_app::diagnostics::record("warn", "model-cleanup", &error);
+        }
+    }
+    Ok(())
 }
 
 fn commit_at(
@@ -589,13 +597,47 @@ fn commit_at(
     Ok(())
 }
 
-pub fn can_undo(root: &Path, client: Client) -> bool {
-    client.backup(root).is_file()
+fn restores_available_models(journal: &Journal, state: &Path, store: &models::Store) -> bool {
+    let available = |value: &Value| {
+        value["id"].as_str().is_none_or(|id| store.model(id).is_ok())
+    };
+    journal
+        .deltas
+        .iter()
+        .filter(|delta| delta.at(state))
+        .flat_map(|delta| &delta.edits)
+        .all(|edit| {
+            let Some(before) = edit.before.value() else {
+                return true;
+            };
+            match (edit.section.as_deref(), edit.key.as_str()) {
+                (Some("agents"), _) => before["choices"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .all(available),
+                (None, "desktop" | "code" | "codex" | "codex_cli") => available(before),
+                _ => true,
+            }
+        })
+}
+
+pub fn can_undo(root: &Path, client: Client, store: &models::Store) -> bool {
+    let Ok(Some(journal)) = read_journal(root, &client.backup(root)) else {
+        return false;
+    };
+    restores_available_models(&journal, &models::path(root), store)
 }
 
 pub fn prepare_undo(root: &Path, client: Client, paths: &[PathBuf]) -> Result<Vec<Delta>, String> {
     let mut journal = read_journal(root, &client.backup(root))?.ok_or("没有可以撤销的切换")?;
     validate(&journal, paths)?;
+    let state = models::path(root);
+    if journal.deltas.iter().any(|delta| delta.at(&state))
+        && !restores_available_models(&journal, &state, &models::read(root)?.1)
+    {
+        return Err("上次配置中的模型档案已删除。请从模型库选择其他档案。".into());
+    }
     reverse(&mut journal.deltas);
     Ok(journal.deltas)
 }
@@ -670,6 +712,6 @@ mod tests {
             Plan::open(&second).unwrap().get(None, "appliedId").unwrap(),
             Some(&json!("external"))
         );
-        assert!(!can_undo(dir.path(), Client::Desktop));
+        assert!(!can_undo(dir.path(), Client::Desktop, &models::Store::default()));
     }
 }

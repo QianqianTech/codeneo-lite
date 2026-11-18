@@ -73,6 +73,14 @@ impl Selection {
         self.effort = options;
     }
 
+    pub(crate) fn replace_fingerprint(&mut self, id: &str, current: &str, updated: &str) -> bool {
+        if self.profile_id != id || self.fingerprint != current {
+            return false;
+        }
+        self.fingerprint = updated.into();
+        true
+    }
+
     pub(crate) fn route(
         &self,
         root: &Path,

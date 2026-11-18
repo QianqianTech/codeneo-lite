@@ -248,6 +248,17 @@ async fn remove_model(app: tauri::AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn update_account_key(
+    app: tauri::AppHandle,
+    account_id: String,
+    key: String,
+) -> Result<String, String> {
+    let result = models::update_account_key(&secrets::root()?, &account_id, &key).await?;
+    tray::refresh(&app);
+    Ok(result)
+}
+
+#[tauri::command]
 async fn save_models(
     app: tauri::AppHandle,
     input: models::Input,
@@ -641,6 +652,7 @@ fn main() {
             save_model,
             save_models,
             remove_model,
+            update_account_key,
             model_catalog,
             test_model,
             list_mcp,

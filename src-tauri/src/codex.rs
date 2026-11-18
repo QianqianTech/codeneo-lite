@@ -242,7 +242,7 @@ pub(crate) fn view_on(store: &Store, path: &Path, surface: Surface) -> Result<Cl
     view.can_restore = can_restore;
     if provider == PROVIDER
         && applied(store, surface).is_some_and(|applied| {
-            store.model(&applied.id).is_ok_and(|(saved, account)| {
+            store.applied_model(&applied.id).is_ok_and(|(saved, account)| {
                 if let Some(selected) = &applied.codex_gateway {
                     view.local_gateway
                         && definition
@@ -295,7 +295,7 @@ fn applied_gateway(
             Ok(None)
         };
     };
-    let (model, account) = store.model(&applied.id)?;
+    let (model, account) = store.applied_model(&applied.id)?;
     let route = selection.route(root, model, account)?;
     if port != selection.port()
         || config.get(None, "model")?.and_then(Value::as_str) != Some(&route.model)
@@ -826,11 +826,15 @@ mod tests {
             .unwrap()
             .is_some());
         transaction::undo(root, Client::Codex, &allowed).unwrap();
+        models::remove(root, &second).unwrap();
         let (_, store) = models::read(root).unwrap();
+        assert!(store.model(&second).is_err());
         assert!(applied_gateway(root, &path, &store, Surface::Desktop)
             .unwrap()
             .is_some_and(|(active, port)| active.key == b.key && port == alternate));
         assert!(apply(Target::Official, None, false).is_none());
+        let (_, store) = models::read(root).unwrap();
+        assert!(store.applied_model(&second).is_err());
         assert!(apply(Target::Restore, None, false).is_none());
         let config = Plan::open(&path).unwrap();
         assert_eq!(
@@ -1071,7 +1075,9 @@ mod tests {
         assert!(overlay_text.contains("model_provider = \"codeneo-lite\"") || overlay_text.contains("model_provider = 'codeneo-lite'"));
         assert!(!overlay_text.contains("fixture-provider-key"));
         assert!(overlay_text.contains("gpt-6.1-sol"));
+        models::remove(root, &id).unwrap();
         let (_, store) = models::read(root).unwrap();
+        assert!(store.models.is_empty());
         assert!(store.codex.is_none());
         assert_eq!(store.codex_cli.as_ref().map(|applied| applied.id.as_str()), Some(id.as_str()));
         assert_eq!(view_on(&store, &overlay, Surface::Cli).unwrap().selected.as_deref(), Some(id.as_str()));

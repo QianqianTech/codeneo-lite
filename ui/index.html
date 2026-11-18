@@ -137,6 +137,7 @@
         <header class="page-header">
           <h1 id="models-title" tabindex="-1">模型库</h1>
           <div class="button-row" id="model-header-actions">
+            <button type="button" class="secondary" id="repair-account-key" hidden>补填 API Key</button>
             <button type="button" class="secondary" id="open-model-switch">模型切换</button>
             <button type="button" class="primary" id="new-model"><span aria-hidden="true">＋</span> 添加模型</button>
           </div>
@@ -472,6 +473,21 @@
       <div class="button-row form-actions">
         <button type="button" class="secondary" id="close-mcp-permissions" autofocus>取消</button>
         <button type="submit" class="primary" id="save-mcp-permissions">保存权限</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="account-key-dialog" aria-labelledby="account-key-title" aria-describedby="account-key-help">
+    <form id="account-key-form" autocomplete="off">
+      <h2 id="account-key-title">修改 API Key</h2>
+      <p id="account-key-help" class="muted">同一接入账号下的所有模型将使用新 Key。直连客户端需重新应用档案。</p>
+      <label class="field" for="key-account-picker"><span id="key-account-label">接入账号</span><select id="key-account-picker" aria-labelledby="key-account-label"></select></label>
+      <label class="field" for="new-account-key">新 API Key
+        <input id="new-account-key" type="password" maxlength="4096" autocomplete="new-password" autocapitalize="off" spellcheck="false" required>
+      </label>
+      <p class="feedback" id="account-key-feedback" role="status" hidden></p>
+      <div class="button-row">
+        <button type="button" class="secondary" id="close-account-key">取消</button>
+        <button type="submit" class="primary" id="save-account-key">保存新 Key</button>
       </div>
     </form>
   </dialog>
