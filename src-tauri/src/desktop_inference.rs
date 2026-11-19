@@ -287,6 +287,31 @@ fn has_message_image(request: &Value) -> bool {
         })
 }
 
+fn is_initial_desktop_turn(messages: &Value) -> bool {
+    let Some((prompt, remainder)) = messages.as_array().and_then(|messages| messages.split_first())
+    else {
+        return false;
+    };
+    let content = &prompt["content"];
+    prompt["role"] == "user"
+        && (content.is_string()
+            || content.as_array().is_some_and(|parts| {
+                !parts.iter().any(|part| {
+                    matches!(part["type"].as_str(), Some("tool_result" | "compaction"))
+                })
+            }))
+        && remainder.iter().all(|message| {
+            let content = &message["content"];
+            message["role"] == "system"
+                && (content.is_string()
+                    || content.as_array().is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .all(|part| part["type"] == "text" && part["text"].is_string())
+                    }))
+        })
+}
+
 struct PendingSession {
     request: u64,
     session: String,
@@ -422,17 +447,7 @@ impl Routing {
                     .filter(|id| !id.is_empty() && id.len() <= 128)
                     .map(|id| format!("{:x}", Sha256::digest(id.as_bytes())))
             });
-        let fresh = request
-            .get("messages")
-            .and_then(Value::as_array)
-            .is_some_and(|messages| {
-                matches!(messages.as_slice(), [first] if first["role"] == "user" &&
-                first.get("content").is_some_and(|content| {
-                    content.is_string() || content.as_array().is_some_and(|parts| {
-                        !parts.iter().any(|part| part["type"] == "tool_result")
-                    })
-                }))
-            });
+        let fresh = is_initial_desktop_turn(&request["messages"]);
         let binding = session
             .as_ref()
             .and_then(|key| self.sessions.iter().find(|binding| binding.session == *key));
@@ -792,13 +807,12 @@ impl Service {
             })
     }
 
-    pub(crate) fn pending_session(&self, route: &Route) -> Option<u64> {
-        let listener = self
-            .listener
-            .as_ref()
-            .filter(|listener| !listener.task.is_finished())?;
+    pub(crate) fn pending_session(&self) -> Option<u64> {
+        let listener = self.live_listener()?;
         let routing = listener.routing.lock().expect("Desktop inference");
-        routing.recovery(route).map(|pending| pending.request)
+        routing
+            .recovery(routing.active.as_deref()?)
+            .map(|pending| pending.request)
     }
 
     pub(crate) fn recover_session(&self, route: &Route, request: u64) -> Result<(), String> {
@@ -908,13 +922,18 @@ impl RequestLog {
     }
 
     fn reject_session(&self, code: &str, reason: &str) -> Response<Body> {
-        self.record("warn", "会话路由", code, &format!("HTTP 403 · {reason}"));
-        non_retryable_error(StatusCode::FORBIDDEN, "permission_error", reason)
+        self.record("warn", "会话路由", code, &format!("HTTP 400 · {reason}"));
+        non_retryable_error(StatusCode::BAD_REQUEST, "invalid_request_error", reason)
     }
 
     fn reject_paused(&self) -> Response<Body> {
         let reason = "CodeNeo Lite 网关已暂停。请在主窗口或托盘菜单启动网关后重试。";
-        self.record("info", "本机网关", "GATEWAY_PAUSED", reason);
+        self.record(
+            "info",
+            "本机网关",
+            "GATEWAY_PAUSED",
+            &format!("HTTP 503 · {reason}"),
+        );
         non_retryable_error(StatusCode::SERVICE_UNAVAILABLE, "api_error", reason)
     }
 }
@@ -1150,7 +1169,7 @@ impl Gateway {
             }
             Err(RouteError::Unbound { recoverable }) => {
                 let (code, message) = if recoverable {
-                    ("DESKTOP_SESSION_UNBOUND", "此旧会话需要接续授权。请在 CodeNeo Lite 刷新 Claude Desktop 状态，然后在「恢复与撤销」中选择「接续旧会话」。")
+                    ("DESKTOP_SESSION_UNBOUND", "此旧会话尚未发送给服务商。请在 CodeNeo Lite 的「客户端 → Claude Desktop」点「接续旧会话」，确认后回 Claude Desktop 重试。")
                 } else {
                     (
                         "DESKTOP_SESSION_NO_ID",
@@ -2425,12 +2444,29 @@ args = ["%s", "fixture-codex-key"]
         continuation["metadata"] = Value::Null;
         assert_eq!(
             send(continuation).await.unwrap().status(),
-            StatusCode::FORBIDDEN
+            StatusCode::BAD_REQUEST
         );
         assert_eq!(
             client.post(url).send().await.unwrap().status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[test]
+    fn inline_system_text_does_not_make_a_first_turn_a_continuation() {
+        let prompt = json!({"role":"user","content":"first prompt"});
+        let reminder = json!({"role":"system","content":"<system-reminder>fixture</system-reminder>"});
+        let text_blocks = json!({"role":"system","content":[{"type":"text","text":"fixture"}]});
+        assert!(is_initial_desktop_turn(&json!([prompt, reminder, text_blocks])));
+
+        for messages in [
+            json!([prompt, {"role":"user","content":"another turn"}, reminder]),
+            json!([prompt, {"role":"assistant","content":"prior answer"}, reminder]),
+            json!([prompt, {"role":"system","content":[{"type":"compaction","content":"prior history"}]}]),
+            json!([{"role":"user","content":[{"type":"tool_result","content":"prior result"}]}, reminder]),
+        ] {
+            assert!(!is_initial_desktop_turn(&messages), "{messages}");
+        }
     }
 
     #[tokio::test]
@@ -2455,9 +2491,12 @@ args = ["%s", "fixture-codex-key"]
         let address = first.bind("local-key", 0, &storage).await.unwrap();
         let mut single_model = a.as_ref().clone();
         single_model.additional_models.clear();
-        first.select(Some(Arc::new(single_model)), true);
+        first.select(Some(Arc::new(single_model)), false);
         let mut message = json!({
-            "model":MODEL,"stream":true,"messages":[{"role":"user","content":"fixture"}],
+            "model":MODEL,"stream":true,"messages":[
+                {"role":"user","content":[{"type":"text","text":"fixture"}]},
+                {"role":"system","content":"<system-reminder>fixture</system-reminder>"}
+            ],
             "metadata":{"user_id":json!({"session_id":"fixture-session"}).to_string()}
         });
         let reply = send(address, message.clone())
@@ -2494,7 +2533,7 @@ args = ["%s", "fixture-codex-key"]
             .await
             .unwrap();
         assert!(reply.contains("data: fixture-a-alt\n"));
-        assert!(restored.pending_session(&a).is_none());
+        assert!(restored.pending_session().is_none());
 
         let known_session = message.clone();
         restored.select(Some(b.clone()), false);
@@ -2505,27 +2544,40 @@ args = ["%s", "fixture-codex-key"]
             .await
             .unwrap();
         assert!(reply.contains("data: fixture-b\n"));
-        assert!(restored.pending_session(&b).is_none());
+        assert!(restored.pending_session().is_none());
+
+        let mut missing_id = message.clone();
+        missing_id.as_object_mut().unwrap().remove("metadata");
+        let rejected = send(address, missing_id).await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(rejected.headers()["x-should-retry"], "false");
+        let error: Value = rejected.json().await.unwrap();
+        assert_eq!(error["error"]["type"], "invalid_request_error");
+        assert!(error["error"]["message"].as_str().unwrap().contains("新建会话"));
+        assert!(restored.pending_session().is_none());
 
         message["metadata"]["user_id"] =
             json!(json!({"session_id":"unconfirmed-session"}).to_string());
         let rejected = send(address, message.clone()).await.unwrap();
-        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
         assert_eq!(rejected.headers()["x-should-retry"], "false");
-        let request = restored.pending_session(&b).unwrap();
+        let error: Value = rejected.json().await.unwrap();
+        assert_eq!(error["error"]["type"], "invalid_request_error");
+        assert!(error["error"]["message"].as_str().unwrap().contains("接续旧会话"));
+        let request = restored.pending_session().unwrap();
         assert!(restored.recover_session(&a, request).is_err());
         assert!(restored.recover_session(&b, request + 1).is_err());
         assert_eq!(
             send(address, message.clone()).await.unwrap().status(),
-            StatusCode::FORBIDDEN
+            StatusCode::BAD_REQUEST
         );
-        assert_eq!(restored.pending_session(&b), Some(request));
+        assert_eq!(restored.pending_session(), Some(request));
         restored.recover_session(&b, request).unwrap();
-        assert!(restored.pending_session(&b).is_none());
+        assert!(restored.pending_session().is_none());
         restored.select(Some(a.clone()), false);
         assert_eq!(
             send(address, message.clone()).await.unwrap().status(),
-            StatusCode::FORBIDDEN
+            StatusCode::BAD_REQUEST
         );
         restored.select(Some(b.clone()), false);
         let reply = send(address, message).await.unwrap().text().await.unwrap();

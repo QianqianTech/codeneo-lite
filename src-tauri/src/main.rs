@@ -83,10 +83,9 @@ async fn lite_overview(app: tauri::AppHandle) -> Result<serde_json::Value, Strin
         if let Some(desktop) = clients.iter_mut().find(|entry| entry["id"] == "desktop") {
             if desktop["status"]["local_gateway"] == true {
                 match desktop_models::status(&secrets::root()?).await {
-                    Ok((verified, pending)) => {
+                    Ok(verified) => {
                         desktop["status"]["gateway_ready"] = true.into();
                         desktop["status"]["gateway_verified"] = verified.into();
-                        desktop["status"]["recover_session"] = serde_json::json!(pending);
                     }
                     Err(error) => append_issue(&mut desktop["status"], error),
                 }

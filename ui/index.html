@@ -79,6 +79,11 @@
                 </dl>
                 <div id="current-models" class="current-models" hidden></div>
                 <p class="muted switch-note" id="gateway-status" hidden></p>
+                <div class="pending" id="desktop-recovery" hidden>
+                  <p id="desktop-recovery-note">旧会话尚未发送给服务商。确认接续后，可保留上下文继续。</p>
+                  <button type="button" class="secondary" id="recover-desktop-session" aria-describedby="desktop-recovery-note">接续旧会话</button>
+                </div>
+                <p class="feedback" id="desktop-recovery-feedback" role="status" hidden></p>
                 <p id="launch-note" hidden></p>
               </section>
               <p class="feedback" id="launch-feedback" role="status" hidden></p>
@@ -124,7 +129,6 @@
                   <div class="button-row">
                     <button type="button" class="secondary" id="restore-model"></button>
                     <button type="button" class="secondary" id="undo-model">撤销上次配置</button>
-                    <button type="button" class="secondary" id="recover-desktop-session" hidden>接续旧会话</button>
                   </div>
                 </details>
               </section>

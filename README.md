@@ -73,7 +73,7 @@ Claude Desktop 选择新的第三方档案时默认使用「CodeNeo Lite网关�
 
 ### 一个档案使用多个模型
 
-- **Claude Desktop** 在客户端页点击「配置可选模型」，从服务商目录勾选模型，或在「手动添加模型 ID」里每行输入一个 ID。在已选列表中可移除模型或点击「设为默认」，一次保存到当前档案。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。重开 Claude Desktop 可以刷新它的模型菜单。旧会话若提示接续授权，可刷新 Lite 中的 Desktop 状态后，点击「恢复与撤销 → 接续旧会话」。
+- **Claude Desktop** 在客户端页点击「配置可选模型」，从服务商目录勾选模型，或在「手动添加模型 ID」里每行输入一个 ID。在已选列表中可移除模型或点击「设为默认」，一次保存到当前档案。Claude Desktop 会过滤第三方模型 ID，Kimi、DeepSeek 等档案通过 Lite 网关接入。重开 Claude Desktop 可以刷新它的模型菜单。旧会话需要接续时，Lite 在「客户端 → Claude Desktop」的网关状态下显示「接续旧会话」。授权后回到原会话重试，才会向当前服务商发送会话上下文；不想发送历史可新建会话。若入口已消失，先回原会话重试一次。
 - **Claude Code** 在档案中展开「Claude Code 模型映射」。可分别配置 Opus、Sonnet、Haiku、Fable、快速模型、子 Agent 和推理模型。未填写的角色沿用档案的默认模型。
 - **Codex** 直连档案会将同一账号下已保存的模型写入原生目录，所选档案作为默认模型。网关模式下，在 Lite 中选择和查看实际转发的模型。
 - **新增 CLI** 在客户端页勾选已保存的模型并指定默认项，再点击「应用模型列表」。Kimi Code CLI 可以填写模型上下文上限。Qwen Code 会选用 OpenAI 兼容认证，恢复原配置时还原认证设置。

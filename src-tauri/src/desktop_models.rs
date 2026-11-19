@@ -285,11 +285,11 @@ pub(crate) async fn discover_efforts(
     Ok(desktop_effort::discover(&base, auth, &key, &names).await)
 }
 
-pub async fn status(root: &Path) -> Result<(bool, Option<u64>), String> {
+pub async fn status(root: &Path) -> Result<bool, String> {
     let (_, store) = models::read(root)?;
     let paths = DesktopFiles::new(desktop::locations()?);
     let Some(active) = applied_route(root, &paths, &store)? else {
-        return Ok((false, None));
+        return Ok(false);
     };
     let service = SERVICE.lock().await;
     if let Some(port) = service.port().filter(|port| *port != active.port) {
@@ -300,10 +300,7 @@ pub async fn status(root: &Path) -> Result<(bool, Option<u64>), String> {
             "CodeNeo Lite网关尚未就绪。请从 Lite 打开 Claude Desktop，或重新应用档案。".into(),
         );
     }
-    Ok((
-        service.verified(&active.route),
-        service.pending_session(&active.route),
-    ))
+    Ok(service.verified(&active.route))
 }
 
 pub async fn sync(root: &Path) -> Result<(), String> {
@@ -347,7 +344,7 @@ pub async fn recover_session(root: &Path, request: u64) -> Result<String, String
         .ok_or("Claude Desktop 当前未使用 CodeNeo Lite网关。")?;
     let service = SERVICE.lock().await;
     service.recover_session(&active.route, request)?;
-    Ok("已接续该会话。请回到 Claude Desktop 重试。".into())
+    Ok("已授权接续。请回到 Claude Desktop 重试。".into())
 }
 
 #[cfg(test)]

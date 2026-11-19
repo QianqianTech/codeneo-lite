@@ -24,6 +24,7 @@ pub(crate) static SERVICE: LazyLock<tokio::sync::Mutex<desktop_inference::Servic
 pub(crate) struct Status {
     paused: bool,
     ready: bool,
+    desktop_recovery_request: Option<u64>,
 }
 
 pub(crate) fn initialize_pause(root: &Path) -> Result<(), String> {
@@ -37,6 +38,7 @@ pub(crate) async fn status() -> Status {
     Status {
         paused: service.is_paused(),
         ready: service.is_ready(),
+        desktop_recovery_request: service.pending_session(),
     }
 }
 

@@ -57,6 +57,8 @@ async function main() {
       window.switches = [];
       window.gatewayAvailable = true;
       window.gatewayPaused = false;
+      window.desktopRecoveryRequest = null;
+      window.desktopRecoveryCalls = [];
       const hasGatewayRoute = () => clients.some(client => client.status.gateway_ready);
       const listeners = new Map();
       window.setGatewayPaused = paused => {
@@ -119,7 +121,14 @@ async function main() {
         if (command === 'lite_gateway_status') return {
           paused: window.gatewayPaused,
           ready: !window.gatewayPaused && window.gatewayAvailable && hasGatewayRoute(),
+          desktop_recovery_request: window.desktopRecoveryRequest,
         };
+        if (command === 'recover_desktop_model_session') {
+          window.desktopRecoveryCalls.push(args.request);
+          if (!args.request || args.request !== window.desktopRecoveryRequest) throw '待接续会话已变更或过期。';
+          window.desktopRecoveryRequest = null;
+          return '已授权接续。请回到 Claude Desktop 重试。';
+        }
         if (command === 'lite_set_gateway_paused') {
           if (!args.paused) {
             if (!hasGatewayRoute()) throw '请先在 Claude Desktop 或 Codex 应用使用 Lite 网关的模型档案。';
@@ -591,6 +600,21 @@ async function main() {
     await gatewayIndicator(false).waitFor({ timeout: 8000 });
     await startGateway.click();
     await gatewayIndicator(true).waitFor();
+    const recoverSession = page.getByRole('button', { name: '接续旧会话', exact: true });
+    const recoveryDialog = page.getByRole('dialog', { name: '接续 Claude Desktop 旧会话？', exact: true });
+    assert.equal(await recoverSession.isVisible(), false);
+    await page.evaluate(() => { window.desktopRecoveryRequest = 301; });
+    await recoverSession.waitFor({ timeout: 8000 });
+    assert.ok(await page.getByText('旧会话尚未发送给服务商。确认接续后，可保留上下文继续。', { exact: true }).isVisible());
+    await recoverSession.click();
+    await recoveryDialog.getByRole('button', { name: '取消', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => window.desktopRecoveryCalls), []);
+    await recoverSession.click();
+    await recoveryDialog.getByText(/上下文会发送给当前服务商/).waitFor();
+    await recoveryDialog.getByRole('button', { name: '确认接续', exact: true }).click();
+    await page.locator('#desktop-recovery-feedback').getByText('已授权接续。请回到 Claude Desktop 重试。', { exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.desktopRecoveryCalls), [301]);
+    await recoverSession.waitFor({ state: 'hidden' });
     await page.getByRole('button', { name: '拉取模型', exact: true }).click();
     await page.getByText('供应商模型目录（1 项）', { exact: true }).waitFor();
     assert.equal(await page.locator('#client-catalog-model').inputValue(), 'fixture-desktop-alt');

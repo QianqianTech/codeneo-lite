@@ -46,6 +46,7 @@ const lite = (() => {
   let gatewaySequence = 0;
   let gatewayState = null;
   let changingGateway = false;
+  let desktopRecoveryFeedback = null;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -413,6 +414,10 @@ const lite = (() => {
       : gatewayState?.ready === false ? "CodeNeo Lite网关 · 未就绪"
       : status.gateway_verified ? "CodeNeo Lite网关 · 已完成转发"
       : status.gateway_ready ? "CodeNeo Lite网关 · 已就绪" : "CodeNeo Lite网关";
+    const desktopGateway = target.id === "desktop" && status.local_gateway;
+    $("desktop-recovery").hidden = !(desktopGateway && gatewayState?.ready && gatewayState.desktop_recovery_request);
+    $("recover-desktop-session").disabled = locked;
+    message($("desktop-recovery-feedback"), desktopRecoveryFeedback?.kind || "", desktopGateway ? desktopRecoveryFeedback?.text : "");
     const supported = target.protocols || [target.protocol];
     $("client-protocol").textContent = supported.length
       ? "支持 " + supported.map(protocol => protocols[protocol] || protocol).join("、")
@@ -450,10 +455,7 @@ const lite = (() => {
     restore.disabled = locked;
     $("undo-model").hidden = !status.can_undo;
     $("undo-model").disabled = locked;
-    const recovery = $("recover-desktop-session");
-    recovery.hidden = target.id !== "desktop" || !status.recover_session;
-    recovery.disabled = locked;
-    $("client-recovery").hidden = !canApply(target) || (restore.hidden && !status.can_undo && recovery.hidden);
+    $("client-recovery").hidden = !canApply(target) || (restore.hidden && !status.can_undo);
     $("client-pending").hidden = !status.pending;
     if (status.pending) {
       const model = api.data.models.find(model => model.id === status.pending.id);
@@ -602,7 +604,11 @@ const lite = (() => {
     const index = ++gatewaySequence;
     const state = await invoke("lite_gateway_status").catch(() => null);
     if (!state || index !== gatewaySequence) return;
-    const changed = state.paused !== gatewayState?.paused || state.ready !== gatewayState?.ready;
+    const recoveryChanged = state.desktop_recovery_request !== gatewayState?.desktop_recovery_request;
+    const changed = state.paused !== gatewayState?.paused || state.ready !== gatewayState?.ready || recoveryChanged;
+    if (recoveryChanged && state.desktop_recovery_request && desktopRecoveryFeedback?.kind === "success") {
+      desktopRecoveryFeedback = null;
+    }
     gatewayState = state;
     renderGatewayControl();
     if (changed) {
@@ -624,6 +630,31 @@ const lite = (() => {
       await refreshGateway();
       changingGateway = false;
       renderGatewayControl();
+    }
+  }
+
+  async function recoverDesktopSession() {
+    const id = "desktop";
+    const request = gatewayState?.desktop_recovery_request;
+    if (!request || !gatewayState.ready || activeClient !== id || !canApply(client(id)) || running.has(id)) return;
+    const confirmed = await confirmAction(
+      "接续 Claude Desktop 旧会话？",
+      "确认后，在 Claude Desktop 重试时，最近请求接续的旧会话上下文会发送给当前服务商。也可以取消并在 Claude Desktop 新建会话。",
+      "确认接续",
+    );
+    if (!confirmed || running.has(id)) return;
+    running.add(id);
+    desktopRecoveryFeedback = { kind: "pending", text: "正在授权接续…" };
+    renderClients();
+    try {
+      const text = await invoke("recover_desktop_model_session", { request });
+      desktopRecoveryFeedback = { kind: "success", text };
+    } catch (error) {
+      desktopRecoveryFeedback = { kind: "error", text: errorText(error) };
+    } finally {
+      await refreshGateway();
+      running.delete(id);
+      renderClients();
     }
   }
 
@@ -816,12 +847,7 @@ const lite = (() => {
     }));
   $("undo-model").addEventListener("click", () => clientAction(activeClient, "undo_model"));
   $("cancel-switch").addEventListener("click", () => clientAction(activeClient, "cancel_code_switch"));
-  $("recover-desktop-session").addEventListener("click", () => {
-    const request = client("desktop")?.status.recover_session;
-    if (request && window.confirm("将 Claude Desktop 最近请求接续的旧会话发送给当前服务商。确认接续？")) {
-      void clientAction("desktop", "recover_desktop_model_session", { request });
-    }
-  });
+  $("recover-desktop-session").addEventListener("click", recoverDesktopSession);
   if (tauri?.event?.listen) {
     void tauri.event.listen("lite-page", ({ payload }) => {
       if (["clients", "models", "tools", "usage"].includes(payload)) show(payload);
