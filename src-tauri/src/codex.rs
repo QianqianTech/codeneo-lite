@@ -394,6 +394,7 @@ fn model_catalog(
             continue;
         }
         let qwen4 = endpoint.as_ref().is_some_and(|url| model_effort::is_qwen4_responses(url, &slug));
+        let glm54 = endpoint.as_ref().is_some_and(|url| model_effort::is_glm54_responses(url, &slug));
         let effort = model_effort::options(account, models::Protocol::Responses, &slug, catalogs)
             .within(&http::EffortLevel::ALL);
         let levels: Vec<_> = effort.iter().flat_map(|effort| &effort.levels)
@@ -407,7 +408,7 @@ fn model_catalog(
                 http::EffortLevel::Max => "Maximum reasoning",
                 http::EffortLevel::Ultra => "Ultra reasoning",
             }})).collect();
-        entries.push(json!({
+        let mut entry = json!({
             "slug": slug,
             "display_name": model.name,
             "description": account.name,
@@ -424,7 +425,20 @@ fn model_catalog(
             "experimental_supported_tools": [],
             "input_modalities": if qwen4 { &["text", "image"][..] } else { &["text"][..] },
             "supports_search_tool": false,
-        }));
+        });
+        if glm54 {
+            entry["context_window"] = json!(1_048_576);
+            entry["max_context_window"] = entry["context_window"].clone();
+            entry["effective_context_window_percent"] = json!(95);
+            entry["input_modalities"] = json!(["text", "image", "audio"]);
+            entry["shell_type"] = json!("shell_command");
+            entry["apply_patch_tool_type"] = json!("freeform");
+            entry["truncation_policy"] = json!({"mode": "bytes", "limit": 10_000});
+            entry["supports_reasoning_summaries"] = json!(true);
+            entry["default_reasoning_summary"] = json!("none");
+            entry["supports_parallel_tool_calls"] = json!(true);
+        }
+        entries.push(entry);
     }
     Ok(json!(entries))
 }
@@ -934,6 +948,75 @@ mod tests {
         let levels: Vec<_> = entry["supported_reasoning_levels"].as_array().unwrap()
             .iter().map(|level| level["effort"].as_str().unwrap()).collect();
         assert_eq!(levels, ["low", "high", "xhigh"]);
+    }
+
+    #[test]
+    fn glm54_reuses_the_coding_plan_key_and_builds_codex_catalogs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let legacy = models::save(root, serde_json::from_value(json!({
+            "preset": "glm", "account_name": "", "base_url": "", "auth": "auth_token",
+            "name": "", "model": "glm-5.3", "key": "fixture-coding-plan-key"
+        })).unwrap(), Some(Client::Code)).unwrap();
+        let (_, store) = models::read(root).unwrap();
+        let account_id = &store.model(&legacy).unwrap().1.id;
+        let id = models::save(root, serde_json::from_value(json!({
+            "preset": "glm", "account_id": account_id, "account_name": "", "base_url": "",
+            "auth": "auth_token", "name": "GLM-5.4", "model": "glm-5.4[1m]", "key": ""
+        })).unwrap(), Some(Client::Codex)).unwrap();
+        let (_, store) = models::read(root).unwrap();
+        assert_eq!(store.accounts.len(), 1);
+        let (old_model, account) = store.model(&legacy).unwrap();
+        assert_eq!(models::code_model(old_model, account), "glm-5.3[1m]");
+        assert_eq!(models::key(root, account).unwrap(), "fixture-coding-plan-key");
+
+        let check_catalog = |entries: &Value| {
+            let entry = &entries[0];
+            assert_eq!(entry["slug"], "glm-5.4");
+            assert_eq!(entry["context_window"], 1_048_576);
+            assert_eq!(entry["max_context_window"], 1_048_576);
+            assert_eq!(entry["input_modalities"], json!(["text", "image", "audio"]));
+            assert_eq!(entry["default_reasoning_level"], "max");
+            let levels = entry["supported_reasoning_levels"].as_array().unwrap();
+            assert_eq!(levels.iter().map(|level| level["effort"].as_str().unwrap()).collect::<Vec<_>>(), ["low", "high", "max"]);
+        };
+        for (file, surface, port) in [
+            ("config.toml", Surface::Desktop, None),
+            ("codeneo-lite.config.toml", Surface::Cli, Some(43110)),
+        ] {
+            let config = root.join(file);
+            let catalog = catalog_path(&config);
+            let connection = if port.is_some() { Connection::Gateway } else { Connection::Direct };
+            let (_, store) = models::read(root).unwrap();
+            let change = plan_switch(root, &config, &store, Target::Profile(&id, Some(connection)),
+                port, &Default::default(), surface).unwrap();
+            if let Some(route) = change.route {
+                assert_eq!(route.endpoint.as_str(), "https://open.bigmodel.cn/api/v1/responses");
+                assert_eq!(route.model, "glm-5.4");
+            }
+            transaction::commit(root, Client::Codex, change.deltas, &[config.clone(), catalog.clone(), models::path(root)]).unwrap();
+            check_catalog(Plan::open(&catalog).unwrap().get(None, "models").unwrap().unwrap());
+            let plan = Plan::open(&config).unwrap();
+            assert_eq!(plan.get(None, "model").unwrap(), Some(&json!("glm-5.4")));
+            let definition = plan.get(Some(PROVIDERS), PROVIDER).unwrap().unwrap();
+            assert_eq!(definition["wire_api"], "responses");
+            if port.is_none() {
+                assert_eq!(definition["base_url"], "https://open.bigmodel.cn/api/v1");
+                if let Some(binary) = env::var_os("CODENEO_TEST_CODEX") {
+                    let output = std::process::Command::new(binary)
+                        .args(["debug", "models"])
+                        .current_dir(root)
+                        .env_clear()
+                        .env("HOME", root)
+                        .env("CODEX_HOME", root)
+                        .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+                        .output().unwrap();
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                    let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    check_catalog(&catalog["models"]);
+                }
+            }
+        }
     }
 
     #[test]

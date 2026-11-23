@@ -700,8 +700,9 @@
     $("provider-key-help").textContent = account?.has_key
       ? "留空继续使用已保存的 Key。如需单独更换，请使用模型库中的「修改 API Key」。"
       : presetId === "qwen" ? "请从千问 Token Plan 订阅页复制以 sk-sp- 开头的专属 API Key。"
-        : account ? "请为此接入账号重新填写 API Key。"
-        : preset ? `在 ${preset.name} 的控制台创建或复制 API Key。` : "先选一个服务商，再粘贴它提供的 API Key。";
+        : presetId === "glm" ? "请从智谱 GLM Coding Plan 的套餐页面复制专属 API Key。"
+          : account ? "请为此接入账号重新填写 API Key。"
+            : preset ? `在 ${preset.name} 的控制台创建或复制 API Key。` : "先选一个服务商，再粘贴它提供的 API Key。";
     if (resetOnProviderChange && editor.preset !== presetId) {
       $("model-name").value = "";
       resetModelSelection();

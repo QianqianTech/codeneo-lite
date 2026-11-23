@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_MODELS: usize = 2000;
+pub const GLM_5_4: &str = "glm-5.4";
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProviderModel {
@@ -131,6 +132,12 @@ pub fn is_model_studio(base: &Url) -> bool {
             matches!(host, "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com")
                 || host.ends_with(".maas.aliyuncs.com")
         })
+}
+
+pub fn is_glm_endpoint(base: &Url, path: &str) -> bool {
+    base.scheme() == "https"
+        && matches!(base.host_str(), Some("open.bigmodel.cn" | "api.z.ai"))
+        && base.path().trim_end_matches('/') == path
 }
 
 pub fn provider_catalog_urls(base: &Url) -> Vec<String> {
@@ -286,6 +293,11 @@ pub async fn verify_provider_model<T: ProviderTransport + Sync>(transport: &T, b
     if model == "qwen4-max" && base.path() == "/apps/anthropic" && is_model_studio(base) {
         body["thinking"] = json!({"type": "disabled"});
     }
+    if model.eq_ignore_ascii_case(GLM_5_4) && is_glm_endpoint(base, "/api/anthropic") {
+        // GLM-5.4 still reasons at low effort, so allow room for a short answer.
+        body["output_config"] = json!({"effort": "low"});
+        body["max_tokens"] = json!(256);
+    }
     let start = Instant::now();
     let result = match transport.request(endpoint.as_str(), header, Some(body)).await {
         Err(err) => Err(err),
@@ -434,6 +446,24 @@ mod tests {
         let calls = client.calls.lock().unwrap(); assert!(calls[0].0.ends_with("/anthropic/v1/messages")); assert_eq!(calls[0].1.as_ref().unwrap()["model"],"model-a");
         assert!(!serde_json::to_string(&check).unwrap().contains("secret"));
     }
+    #[tokio::test]
+    async fn glm54_anthropic_probe_uses_low_effort_and_strips_the_context_suffix() {
+        let base = provider_base("https://open.bigmodel.cn/api/anthropic").unwrap();
+        let client = stub(vec![(200, json!({
+            "type":"message", "role":"assistant", "model":"glm-5.4",
+            "content":[{"type":"text","text":"OK"}]
+        }))]);
+        let check = verify_provider_model(&client, &base, ("Authorization", "Bearer test-key"), "glm-5.4[1m]")
+            .await.unwrap();
+        assert!(check.healthy);
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "https://open.bigmodel.cn/api/anthropic/v1/messages");
+        let body = calls[0].1.as_ref().unwrap();
+        assert_eq!(body["model"], "glm-5.4");
+        assert_eq!(body["output_config"]["effort"], "low");
+        assert_eq!(body["max_tokens"], 256);
+    }
+
     #[tokio::test]
     async fn status_200_alone_and_rejected_models_never_turn_green() {
         for (status,body) in [(401,json!({})),(429,json!({})),(200,json!({"data":[{"id":"a"}]})),(200,json!({"type":"message","role":"assistant","model":"a","content":[]}))] {

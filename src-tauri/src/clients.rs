@@ -1,7 +1,7 @@
 use crate::{
     codex, desktop, desktop_models, files, model_effort,
     gateway::{self, Connection},
-    model_transport::EffortLevel,
+    model_transport::{self as http, EffortLevel},
     models::{self, Applied, Pending, Store},
     transaction::{self, Client, Delta, Plan},
     vault, workbuddy,
@@ -823,7 +823,16 @@ fn plan_code(
         desired.insert(other.into(), json!(""));
         desired.insert(CODE_MODEL_OPTION.into(), json!(profile.model));
         desired.insert(CODE_MODEL_OPTION_NAME.into(), json!(model.name));
-        let model_id = crate::model_transport::provider_api_model(&profile.model)?;
+        let model_id = http::provider_api_model(&profile.model)?;
+        if model_id.eq_ignore_ascii_case(http::GLM_5_4)
+            && http::provider_base(&profile.base_url)
+                .is_ok_and(|base| http::is_glm_endpoint(&base, "/api/anthropic"))
+        {
+            // Use the owned fields so user-provided context settings take precedence.
+            for field in ["CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"] {
+                capabilities.insert(field.into(), json!("1000000"));
+            }
+        }
         let options = model_effort::options(account, models::Protocol::Anthropic, &model_id, catalogs);
         if let Some(options) = options.within(&EffortLevel::STANDARD) {
             levels = options.levels;
@@ -1357,6 +1366,37 @@ mod tests {
         assert_eq!(repaired["models"][0]["id"], first);
         assert_eq!(repaired["models"][1]["id"], second);
         assert_eq!(repaired["models"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn glm54_code_profile_sets_long_context_and_preserves_user_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("lite");
+        let code = temp.path().join("settings.json");
+        let original = json!({"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"850000"}});
+        fs::write(&code, transaction::json_bytes(&original).unwrap()).unwrap();
+        let id = models::save(&root, serde_json::from_value(json!({
+            "preset": "glm", "account_name": "", "base_url": "", "auth": "auth_token",
+            "name": "", "model": "glm-5.4", "key": "fixture-coding-plan-key"
+        })).unwrap(), Some(Client::Code)).unwrap();
+        let paths = [code.clone(), models::path(&root)];
+        let apply = |id| {
+            let (_, store) = models::read(&root).unwrap();
+            let deltas = plan_code(&root, &code, &store, id, &Default::default()).unwrap();
+            transaction::commit(&root, Client::Code, deltas, &paths).unwrap();
+        };
+        apply(Some(&id));
+        let applied = read(&code);
+        assert_eq!(applied["env"]["ANTHROPIC_MODEL"], "glm-5.4[1m]");
+        assert_eq!(applied["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
+        assert_eq!(applied["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "850000");
+        assert_eq!(applied["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"],
+            "effort,max_effort,thinking,adaptive_thinking");
+        assert!(require_code_effort(&root, &code, EffortLevel::Max).is_ok());
+        assert!(require_code_effort(&root, &code, EffortLevel::Medium).is_err());
+
+        apply(None);
+        assert_eq!(read(&code), original);
     }
 
     #[test]

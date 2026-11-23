@@ -113,9 +113,9 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             docs_url: "https://docs.bigmodel.cn/cn/coding-plan/tool/claude",
             base_url: "https://open.bigmodel.cn/api/anthropic",
             auth: AuthMode::AuthToken,
-            model: "glm-5.3[1m]",
-            sonnet_model: "glm-5.3[1m]",
-            opus_model: "glm-5.3[1m]",
+            model: "glm-5.4[1m]",
+            sonnet_model: "glm-5.4[1m]",
+            opus_model: "glm-5.4[1m]",
             haiku_model: "glm-5.3-flash[1m]",
             small_fast_model: "",
             subagent_model: "glm-5.3-flash[1m]",
@@ -124,7 +124,7 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             effort_level: "",
             auto_compact_window: "1000000",
             max_context_tokens: "1000000",
-            verified_on: "2026-11-11",
+            verified_on: "2026-11-23",
         },
         ProviderPreset {
             id: "qwen",
@@ -271,9 +271,9 @@ mod tests {
         let glm = preset_by_id("glm").unwrap();
         assert_eq!(glm.base_url, "https://open.bigmodel.cn/api/anthropic");
         assert_eq!(glm.auth, AuthMode::AuthToken);
-        assert_eq!(glm.model, "glm-5.3[1m]");
-        assert_eq!(glm.opus_model, "glm-5.3[1m]");
-        assert_eq!(glm.sonnet_model, "glm-5.3[1m]");
+        assert_eq!(glm.model, "glm-5.4[1m]");
+        assert_eq!(glm.opus_model, "glm-5.4[1m]");
+        assert_eq!(glm.sonnet_model, "glm-5.4[1m]");
         assert_eq!(glm.haiku_model, "glm-5.3-flash[1m]");
         assert_eq!(glm.subagent_model, "glm-5.3-flash[1m]");
         assert_eq!(glm.auto_compact_window, "1000000");
@@ -285,7 +285,8 @@ mod tests {
             assert_eq!(normalize_base_url(preset.base_url).unwrap(), preset.base_url);
             let verified = match preset.id {
                 "openrouter" => "2026-10-27",
-                "kimi" | "kimi-pro" | "glm" => "2026-11-11",
+                "kimi" | "kimi-pro" => "2026-11-11",
+                "glm" => "2026-11-23",
                 "qwen" => "2026-11-17",
                 _ => VERIFIED_ON,
             };

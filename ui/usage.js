@@ -15,7 +15,7 @@
   ];
   const reasons = {
     missing_price: ["价格待补充", "Token 已统计，当前价格表尚未收录此模型。"],
-    plan_only: ["套餐计费", "仅支持 Token Plan，暂无按量 API 单价。"],
+    plan_only: ["套餐计费", "当前仅随编程套餐提供，暂无按量 API 单价。"],
     subscription: ["套餐计费", "本次用量按 Token Plan Credits 抵扣，消耗明细以百炼控制台为准。"],
     dynamic_model: ["实际模型待确认", "记录为路由或套餐模型名，无法确定实际模型单价。"],
     unknown_provider: ["服务商待确认", "记录未提供可核验的服务商，暂无法选择单价。"],

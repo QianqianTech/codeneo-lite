@@ -17,6 +17,26 @@ pub fn run() -> Result<serde_json::Value, String> {
     if (glm.high_cny - 0.0146).abs() > 1e-10 || (glm.low_cny - 0.0146).abs() > 1e-10 {
         return Err("安装包 GLM-5.3 计价校验失败".into());
     }
+    let mut gpt_62 = serde_json::Map::new();
+    for (model, short_usd, long_usd) in [
+        ("gpt-6.2-sol", 0.00405, 1.088004),
+        ("gpt-6.2-astra", 0.0162, 4.352016),
+    ] {
+        let mut checks = serde_json::Map::new();
+        for (name, usage, expected) in [
+            ("short_usd", tokens, short_usd),
+            ("long_usd", Tokens { input: 272_001, ..Tokens::default() }, long_usd),
+        ] {
+            let price = usage_prices::estimate(model, usage)
+                .map_err(|_| format!("安装包缺少 {model} 计价规则"))?;
+            let dollars = price.high_cny / usage_prices::USD_TO_CNY;
+            if (dollars - expected).abs() > 1e-10 || price.low_cny != price.high_cny {
+                return Err(format!("安装包 {model} {name} 计价校验失败"));
+            }
+            checks.insert(name.into(), dollars.into());
+        }
+        gpt_62.insert(model.into(), checks.into());
+    }
     let qwen = usage_prices::estimate("qwen4-max", Tokens {
         cache_write: 100,
         cache_write_long: 50,
@@ -42,6 +62,7 @@ pub fn run() -> Result<serde_json::Value, String> {
         "pricing_verified": usage_prices::VERIFIED,
         "pricing_contract": 2,
         "glm_5_3_cny": glm.high_cny,
+        "gpt_6_2": gpt_62,
         "qwen4_max_cny": qwen.high_cny,
         "qwen4_aliases": "plan_only",
         "unknown_model": "missing_price"

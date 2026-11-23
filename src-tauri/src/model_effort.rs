@@ -95,6 +95,21 @@ pub(crate) fn is_qwen4_responses(endpoint: &Url, model: &str) -> bool {
         && http::is_model_studio(endpoint)
 }
 
+pub(crate) fn is_glm54_responses(endpoint: &Url, model: &str) -> bool {
+    model.eq_ignore_ascii_case(http::GLM_5_4)
+        && ["/api/v1", "/api/v1/responses"]
+            .into_iter()
+            .any(|path| http::is_glm_endpoint(endpoint, path))
+}
+
+pub(crate) fn glm54_effort(value: &str) -> EffortLevel {
+    match value {
+        "none" | "minimal" | "light" | "low" => EffortLevel::Low,
+        "medium" | "high" => EffortLevel::High,
+        _ => EffortLevel::Max,
+    }
+}
+
 pub(crate) fn adaptive_anthropic(account: &Account, model: &str) -> bool {
     let Ok(base) = http::provider_base(account.base_for(Protocol::Anthropic)) else {
         return false;
@@ -120,11 +135,12 @@ pub(crate) fn claude_code_capabilities(
     use EffortLevel::{High, Low, Max, Medium, XHigh};
     let model = http::provider_api_model(model).ok()?;
     let options = options(account, Protocol::Anthropic, &model, catalogs);
-    // Claude Code always offers low/medium/high as a group. Other subsets
-    // are available through the per-session launcher in Lite.
-    if ![Low, Medium, High]
-        .iter()
-        .all(|level| options.levels.contains(level))
+    let glm54 = model.eq_ignore_ascii_case(http::GLM_5_4)
+        && http::provider_base(account.base_for(Protocol::Anthropic))
+            .is_ok_and(|base| http::is_glm_endpoint(&base, "/api/anthropic"));
+    // Claude Code always offers low/medium/high as a group. GLM-5.4 accepts
+    // medium as an alias for high.
+    if !glm54 && ![Low, Medium, High].iter().all(|level| options.levels.contains(level))
     {
         return None;
     }
@@ -135,7 +151,7 @@ pub(crate) fn claude_code_capabilities(
     if options.levels.contains(&Max) {
         capabilities.push("max_effort");
     }
-    if adaptive_anthropic(account, &model) {
+    if glm54 || adaptive_anthropic(account, &model) {
         capabilities.extend(["thinking", "adaptive_thinking"]);
     }
     Some(capabilities.join(","))
@@ -237,6 +253,12 @@ fn known(base: &Url, protocol: Protocol, raw_model: &str) -> Option<Options> {
             "/api" | "/api/paas/v4" | "/api/coding/paas/v4",
             "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx" | "glm-5.3-flashx-legal",
         ) => option(&[Low, High, Max], Max),
+        ("open.bigmodel.cn" | "api.z.ai", path, http::GLM_5_4)
+            if matches!((path, protocol),
+                ("/api", Protocol::Responses) | ("/api/coding/paas/v4", Protocol::ChatCompletions)) =>
+        {
+            option(&[Low, High, Max], Max)
+        }
         ("api.openai.com", "", "gpt-6-astra" | "gpt-6.1-sol") => {
             option(&EffortLevel::STANDARD, Medium)
         }

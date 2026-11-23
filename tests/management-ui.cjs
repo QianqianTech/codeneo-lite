@@ -3,6 +3,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { chromium } = require('playwright');
 const { servers: mcpCatalog } = require('../mcp/catalog.json');
+const { version: appVersion } = require('../package.json');
 
 async function main() {
   const browser = await chromium.launch({
@@ -14,7 +15,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1080, height: 760 } });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.addInitScript(mcpCatalog => {
+    await page.addInitScript(({ mcpCatalog, appVersion }) => {
       const official = { state: 'official', account: 'Claude 官方', model: '', selected: null, can_undo: false, pending: null };
       const clients = [
         ['desktop', 'Claude Desktop', 'anthropic', ['stdio']],
@@ -69,12 +70,13 @@ async function main() {
         ['deepseek', 'DeepSeek', 'https://api.deepseek.com/anthropic', ['deepseek-flash', 'deepseek-v4-pro'], clients.map(client => client.id)],
         ['kimi', 'Kimi Code', 'https://api.kimi.com/coding', ['k3', 'k3.1-pro', 'k3.1-pro-highspeed', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], ['desktop', 'code']],
         ['openrouter', 'OpenRouter', 'https://openrouter.ai/api', ['anthropic/claude-sonnet-5.5', 'fixture/' + 'long-model-id-'.repeat(16) + 'v1'], clients.map(client => client.id)],
-        ['glm', '智谱 GLM', 'https://open.bigmodel.cn/api/anthropic', ['glm-5.3', 'glm-5.3-flash'], ['desktop', 'code']],
+        ['glm', '智谱 GLM', 'https://open.bigmodel.cn/api/anthropic', ['glm-5.4', 'glm-5.3', 'glm-5.3-flash'], clients.map(client => client.id)],
         ['qwen', '通义千问', 'https://example.invalid/anthropic', ['qwen3.8-max', 'qwen3.8-flash', 'deepseek-v4.1-flash-1017', 'auto'], ['desktop', 'code']],
         ['openai', 'OpenAI API', 'https://api.openai.com/v1', ['gpt-6.1-sol'], ['codex', 'workbuddy']],
         ['custom', '自定义兼容接口', '', [], clients.map(client => client.id)],
       ].map(([id, name, base_url, models, clients]) => ({ id, provider: id, name, base_url, auth: 'auth_token',
-        protocols: id === 'openai' ? ['responses', 'chat_completions'] : ['anthropic'], models, clients }));
+        protocols: id === 'glm' ? ['anthropic', 'responses', 'chat_completions']
+          : id === 'openai' ? ['responses', 'chat_completions'] : ['anthropic'], models, clients }));
       const view = {
         clients, presets,
         accounts: [{ id: 'missing-key', provider: 'deepseek', preset: 'deepseek', name: '待补 Key 的账号',
@@ -381,12 +383,13 @@ async function main() {
               estimate: { low_cny: 11.8879, high_cny: 13.3996, source: 'qwen_max' } },
           ];
           return {
-            app_version: '0.1.8', pricing_verified: '2026-11-17',
+            app_version: appVersion, pricing_verified: '2026-11-19',
             pricing_sources: [
-              { id: 'openai', label: 'OpenAI 官方价', url: 'https://developers.openai.com/api/docs/pricing', verified: '2026-11-13' },
+              { id: 'openai', label: 'OpenAI 官方价', url: 'https://developers.openai.com/api/docs/pricing', verified: '2026-11-19' },
               { id: 'qwen_max', label: '百炼官方价 · 北京', url: 'https://help.aliyun.com/zh/model-studio/qwen3-8-max', verified: '2026-11-13' },
               { id: 'qwen4_max', label: '百炼官方价 · 北京', url: 'https://help.aliyun.com/zh/model-studio/model-pricing', verified: '2026-11-17' },
               { id: 'glm', label: '智谱官方价', url: 'https://docs.bigmodel.cn/cn/guide/start/pricing', verified: '2026-11-16' },
+              { id: 'glm_coding_plan', label: '智谱 GLM Coding Plan', url: 'https://docs.bigmodel.cn/cn/coding-plan/latest-model', verified: '2026-11-23' },
               { id: 'qwen_preview', label: 'Token Plan 官方说明', url: 'https://help.aliyun.com/zh/model-studio/qwen4-max-preview', verified: '2026-11-16' },
             ],
             exchange_rate_date: '2026-11-12', usd_to_cny: 6.7174,
@@ -408,7 +411,7 @@ async function main() {
         listeners.set(name, listener);
         return () => listeners.delete(name);
       } } };
-    }, mcpCatalog);
+    }, { mcpCatalog, appVersion });
     await page.goto(pathToFileURL(path.join(__dirname, '../ui/index.html')).href);
     const nav = name => page.getByRole('navigation').getByRole('button', { name, exact: true });
     const client = name => page.locator('#client-list').getByRole('button', { name, exact: true });
@@ -1088,7 +1091,7 @@ async function main() {
     assert.ok(await page.getByRole('link', { name: '智谱官方价' }).isVisible());
     assert.equal(await page.getByRole('link', { name: '智谱官方价' }).getAttribute('title'), '核对于 2026-11-16');
     assert.equal(await page.locator('#usage-cost-caption').innerText(), '已估算 100% Token 的参考费用');
-    assert.equal(await page.locator('#usage-pricing-date').innerText(), 'CodeNeo Lite 0.1.8 · 价格表更新于 2026-11-17');
+    assert.equal(await page.locator('#usage-pricing-date').innerText(), `CodeNeo Lite ${appVersion} · 价格表更新于 2026-11-19`);
     assert.equal(await page.locator('#usage-cost-note').isVisible(), false);
     assert.equal(await page.locator('#usage-partial').isVisible(), false);
     await page.locator('#usage-client').selectOption('workbuddy');
@@ -1109,7 +1112,7 @@ async function main() {
     assert.equal(await page.locator('#usage-cost-note').innerText(), '1 项套餐计费 · 1 项实际模型待确认');
     assert.match(await page.locator('#usage-cost-caption').innerText(), /^已估算 94.9% Token/);
     assert.ok(await page.getByRole('link', { name: 'Token Plan 官方说明' }).isVisible());
-    assert.ok(await page.getByText('仅支持 Token Plan，暂无按量 API 单价。', { exact: true }).isVisible());
+    assert.ok(await page.getByText('当前仅随编程套餐提供，暂无按量 API 单价。', { exact: true }).isVisible());
     assert.equal(await page.locator('#usage-partial').innerText(), '部分统计：Codex 的本机用量记录未读全。');
     const topModel = page.locator('#usage-rows tr').first();
     assert.equal(await topModel.locator('.usage-row-total .usage-token').innerText(), '1,413.55 M');
@@ -1128,6 +1131,25 @@ async function main() {
     assert.equal(await page.locator('#usage-cost-label').innerText(), '公开 API 估价 · 人民币');
     assert.equal(await page.locator('#usage-cost-note').isVisible(), false);
     await page.locator('#usage-client').selectOption('');
+
+    await page.evaluate(() => { window.usageRows = [
+      { client: 'codex', model: 'gpt-6.2-sol', tokens: { input: 100000, output: 50000, cache_read: 100000, cache_write: 0, cache_write_long: 0 },
+        estimate: { low_cny: 4.769354, high_cny: 4.769354, source: 'openai' }, priced_tokens: 250000, unpriced: [] },
+      { client: 'codex', model: 'gpt-6.2-astra', tokens: { input: 100000, output: 50000, cache_read: 100000, cache_write: 0, cache_write_long: 0 },
+        estimate: { low_cny: 19.077416, high_cny: 19.077416, source: 'openai' }, priced_tokens: 250000, unpriced: [] },
+    ]; });
+    await page.locator('#refresh-usage').click();
+    await page.getByRole('row', { name: /gpt-6\.2-astra/ }).waitFor();
+    for (const [model, amount] of [['gpt-6.2-sol', 5], ['gpt-6.2-astra', 19]]) {
+      const row = page.getByRole('row').filter({ has: page.getByText(model, { exact: true }) });
+      assert.match(await row.locator('.usage-row-price').innerText(), new RegExp(`^约 [¥￥]${amount}$`));
+      assert.equal(await row.getByRole('link', { name: 'OpenAI 官方价' }).getAttribute('title'), '核对于 2026-11-19');
+      assert.equal(await row.locator('.usage-price-status').count(), 0);
+    }
+    assert.equal(await page.locator('#usage-cost-caption').innerText(), '已估算 100% Token 的参考费用');
+    assert.equal(await page.locator('#usage-cost-note').isVisible(), false);
+    assert.match(await page.locator('#usage-cost').innerText(), /^约 [¥￥]24$/);
+    await capture('06-usage-gpt62', { fullPage: true });
 
     // Unknown future models and partly priced rows retain their tokens and cannot
     // turn the subtotal into an apparently complete estimate.
@@ -1148,6 +1170,15 @@ async function main() {
     await page.locator('#refresh-usage').click();
     await page.getByText('已估算 0% Token 的参考费用，其余见明细说明', { exact: true }).waitFor();
     assert.equal(await page.locator('#usage-cost').innerText(), '—');
+    await page.evaluate(() => { window.usageRows = [
+      { client: 'codex', model: 'glm-5.4', tokens: { input: 2500, output: 500, cache_read: 0, cache_write: 0, cache_write_long: 0 },
+        estimate: null, priced_tokens: 0, unpriced: [{ reason: 'plan_only', source: 'glm_coding_plan', tokens: 3000 }] },
+    ]; });
+    await page.locator('#refresh-usage').click();
+    const glmUsage = page.getByRole('row', { name: /glm-5\.4/ });
+    await glmUsage.getByText('套餐计费', { exact: true }).waitFor();
+    assert.equal(await page.locator('#usage-total').getAttribute('title'), '3,000 Token');
+    assert.equal(await glmUsage.getByRole('link', { name: '智谱 GLM Coding Plan' }).getAttribute('title'), '核对于 2026-11-23');
     await page.evaluate(() => { delete window.usageRows; });
     await page.locator('#refresh-usage').click();
     await page.locator('#usage-total').getByText('1,762.99 M', { exact: true }).waitFor();
@@ -1355,6 +1386,17 @@ async function main() {
     await page.getByRole('button', { name: '应用模型列表' }).click();
     await page.getByText('已应用模型列表。', { exact: true }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.appliedAgentModels), ['qa']);
+
+    await client('Codex').click();
+    await page.getByRole('button', { name: '配置新模型', exact: true }).click();
+    await page.locator('#provider-picker').selectOption('glm');
+    await key.fill('fixture-glm-coding-plan-key');
+    await page.getByRole('button', { name: '手动选择模型' }).click();
+    assert.equal((await candidateIds())[0], 'glm-5.4');
+    await page.getByRole('checkbox', { name: 'glm-5.4', exact: true }).check();
+    await page.getByRole('button', { name: '保存档案' }).click();
+    await page.getByText('档案已保存。选择连接方式后，点击「应用模式」。').waitFor();
+    assert.equal(await page.locator('#client-model-picker').inputValue(), 'glm-5.4-profile');
 
     assert.deepEqual(errors, []);
     console.log('codeneo-lite UI: model library filters, model setup and undo, native launch, MCP edit and verification, usage, and narrow layout passed.');

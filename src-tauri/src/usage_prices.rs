@@ -1,7 +1,7 @@
 use crate::{models::QWEN4_MAX, usage::Tokens};
 use serde::{Deserialize, Serialize};
 
-pub const VERIFIED: &str = "2026-11-17";
+pub const VERIFIED: &str = "2026-11-19";
 pub const EXCHANGE_RATE_DATE: &str = "2026-11-12";
 pub const USD_TO_CNY: f64 = 6.7174;
 pub const EXCHANGE_RATE_SOURCE: &str =
@@ -18,6 +18,7 @@ pub enum Source {
     QwenFlash,
     Kimi,
     Glm,
+    GlmCodingPlan,
     QwenPreview,
     QwenTokenPlan,
     Qwen37Max,
@@ -79,6 +80,10 @@ impl Source {
             Glm => (
                 "智谱官方价",
                 "https://docs.bigmodel.cn/cn/guide/start/pricing",
+            ),
+            GlmCodingPlan => (
+                "智谱 GLM Coding Plan",
+                "https://docs.bigmodel.cn/cn/coding-plan/latest-model",
             ),
             QwenPreview => (
                 "Token Plan 官方说明",
@@ -150,8 +155,10 @@ impl Source {
             label,
             url,
             verified: match self {
-                Anthropic | Openai | Deepseek | QwenMax | QwenFlash | Kimi => "2026-11-13",
-                Qwen4Max | QwenTokenPlan => VERIFIED,
+                Openai => VERIFIED,
+                GlmCodingPlan => "2026-11-23",
+                Anthropic | Deepseek | QwenMax | QwenFlash | Kimi => "2026-11-13",
+                Qwen4Max | QwenTokenPlan => "2026-11-17",
                 _ => "2026-11-16",
             },
         }
@@ -300,6 +307,7 @@ impl Unpriced {
 fn unavailable(model: &str) -> Unpriced {
     use Reason::*;
     let (reason, source) = match model {
+        crate::model_transport::GLM_5_4 => (PlanOnly, Some(Source::GlmCodingPlan)),
         "qwen4-max-preview" => (PlanOnly, Some(Source::QwenPreview)),
         "auto" => (DynamicModel, Some(Source::BailianModels)),
         "kimi-for-coding" | "kimi-for-coding-highspeed" => (DynamicModel, Some(Source::KimiCode)),
@@ -365,7 +373,9 @@ pub fn for_provider(
     let tiered = source == Openai
         && matches!(
             dated_alias(model),
-            "gpt-6-astra"
+            "gpt-6.2-astra"
+                | "gpt-6.2-sol"
+                | "gpt-6-astra"
                 | "gpt-6.1-sol"
                 | "gpt-6.1-terra"
                 | "gpt-6-luna"
@@ -418,10 +428,16 @@ pub fn estimate(model: &str, tokens: Tokens) -> Result<Estimate, Unpriced> {
         }
         "claude-haiku-5-5" => (Anthropic, Rates::claude(0.10, 0.50, 0.01)),
         "claude-haiku-4-5" => (Anthropic, Rates::claude(1.0, 5.0, 0.10)),
+        // Standard API rates. Above 272K input tokens (including caches),
+        // input/cache rates double and output rates increase by 50% for the full request.
+        "gpt-6.2-astra" if long => (Openai, Rates::new(16.0, 60.0, 0.80, 20.0, 40.0)),
+        "gpt-6.2-astra" => (Openai, Rates::new(8.0, 40.0, 0.40, 10.0, 20.0)),
         "gpt-6-astra" if long => (Openai, Rates::new(20.0, 75.0, 2.0, 25.0, 50.0)),
         "gpt-6-astra" => (Openai, Rates::new(10.0, 50.0, 1.0, 12.50, 25.0)),
-        "gpt-6.1-sol" if long => (Openai, Rates::new(4.0, 15.0, 0.20, 5.0, 10.0)),
-        "gpt-6.1-sol" => (Openai, Rates::new(2.0, 10.0, 0.10, 2.50, 5.0)),
+        "gpt-6.2-sol" | "gpt-6.1-sol" if long => {
+            (Openai, Rates::new(4.0, 15.0, 0.20, 5.0, 10.0))
+        }
+        "gpt-6.2-sol" | "gpt-6.1-sol" => (Openai, Rates::new(2.0, 10.0, 0.10, 2.50, 5.0)),
         "gpt-6.1-terra" if long => (Openai, Rates::new(2.0, 7.50, 0.10, 2.50, 5.0)),
         "gpt-6.1-terra" => (Openai, Rates::new(1.0, 5.0, 0.05, 1.25, 2.50)),
         "gpt-6-luna" if long => (Openai, Rates::new(0.20, 0.75, 0.02, 0.25, 0.50)),
@@ -602,8 +618,18 @@ mod tests {
             assert_eq!(issue.reason, Reason::PlanOnly);
             assert_eq!(issue.source, Some(Source::QwenPreview));
         }
+        for alias in ["glm-5.4", "GLM-5.4[1m]", "z-ai/glm-5.4"] {
+            let issue = estimate(alias, tokens).unwrap_err();
+            assert_eq!(issue.reason, Reason::PlanOnly);
+            assert_eq!(issue.source, Some(Source::GlmCodingPlan));
+        }
         for unknown in [
-            "glm-5.4",
+            "gpt-6.3-sol",
+            "gpt-6.3-astra",
+            "gpt-6.2-astra-law",
+            "proxy/gpt-6.2-sol",
+            "glm-5.5",
+            "glm-5.4-special",
             "qwen5-max",
             "qwen4-max-experimental",
             "proxy/glm-5.3",
@@ -649,13 +675,65 @@ mod tests {
                 .reason,
             Reason::ProviderMismatch
         );
-        for model in ["gpt-6-luna", "gpt-6.1-sol"] {
+        for model in ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra"] {
             assert_eq!(
                 for_provider("openai", model, tokens, false)
                     .unwrap_err()
                     .reason,
                 Reason::RequestDetailRequired
             );
+        }
+    }
+
+    #[test]
+    fn gpt_62_prices_cover_all_token_types_and_normalized_ids() {
+        for (model, rates) in [
+            ("gpt-6.2-sol", [2.0, 10.0, 0.10, 2.50, 5.0]),
+            ("gpt-6.2-astra", [8.0, 40.0, 0.40, 10.0, 20.0]),
+        ] {
+            let cases = [
+                Tokens { input: 1000, ..Tokens::default() },
+                Tokens { output: 1000, ..Tokens::default() },
+                Tokens { cache_read: 1000, ..Tokens::default() },
+                Tokens { cache_write: 1000, ..Tokens::default() },
+                Tokens { cache_write_long: 1000, ..Tokens::default() },
+            ];
+            for alias in [model.to_owned(), format!(" OPENAI/{} ", model.to_uppercase()),
+                format!("{model}-20261118[1m]")] {
+                for (tokens, rate) in cases.into_iter().zip(rates) {
+                    let price = for_provider("api.openai.com", &alias, tokens, true).unwrap();
+                    close(price.low_cny, rate * USD_TO_CNY / 1000.0);
+                    close(price.high_cny, price.low_cny);
+                    assert_eq!(price.source, Source::Openai);
+                }
+            }
+            assert_eq!(
+                for_provider("anthropic", model, cases[0], true).unwrap_err().reason,
+                Reason::ProviderMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_62_long_context_boundary_counts_every_input_category() {
+        // Total input is exactly 272K, while output pushes total tokens above it.
+        let short = Tokens {
+            input: 52_000,
+            cache_read: 200_000,
+            cache_write: 10_000,
+            cache_write_long: 10_000,
+            output: 500,
+        };
+        let long = Tokens { input: 52_001, ..short };
+        for (model, short_usd, long_usd) in [
+            ("gpt-6.2-sol", 0.204, 0.405504),
+            ("gpt-6.2-astra", 0.816, 1.622016),
+        ] {
+            for (tokens, expected) in [(short, short_usd), (long, long_usd)] {
+                let price = estimate(model, tokens).unwrap();
+                close(price.low_cny, expected * USD_TO_CNY);
+                close(price.high_cny, price.low_cny);
+            }
         }
     }
 

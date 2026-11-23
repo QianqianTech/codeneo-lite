@@ -108,6 +108,11 @@ impl Route {
             .models()
             .map(|(id, name)| {
                 let mut entry = json!({ "name": id, "labelOverride": name });
+                if name.eq_ignore_ascii_case(crate::model_transport::GLM_5_4)
+                    && crate::model_transport::is_glm_endpoint(&self.base, "/api/anthropic")
+                {
+                    entry["supports1m"] = json!(true);
+                }
                 if self.picker_metadata {
                     // A versionless alias does not advertise a Claude model's
                     // effort levels when the real model has none.
@@ -452,6 +457,7 @@ impl Routing {
             .as_ref()
             .and_then(|key| self.sessions.iter().find(|binding| binding.session == *key));
         let requested = request["model"].as_str().unwrap_or_default();
+        let requested = requested.strip_suffix("[1m]").unwrap_or(requested);
         let digest = GatewayModel::route_digest(requested);
         let model = route
             .models()
@@ -1566,6 +1572,36 @@ mod tests {
             let mut request = json!({"model":id, "messages":[{"role":"user","content":"fixture"}]});
             assert_eq!(routing.route(&mut request, true, &log).ok().unwrap().model, model);
         }
+    }
+
+    #[test]
+    fn glm54_desktop_variant_routes_images_and_effort_to_the_vendor_model() {
+        let mut route = profile(
+            "glm-5.3",
+            Url::parse("https://open.bigmodel.cn/api/anthropic").unwrap(),
+        );
+        let target = Arc::get_mut(&mut route).unwrap();
+        target.picker_metadata = true;
+        let glm = GatewayModel::new("glm-5.4".into(), None, true);
+        let long_id = format!("{}[1m]", glm.id);
+        target.additional_models = vec![glm];
+        let config = target.desktop_config("http://127.0.0.1:1", "local-only");
+        assert_eq!(config["inferenceModels"][1]["supports1m"], true);
+        assert_eq!(config["inferenceModels"][1]["maxEffort"], "max");
+
+        let data = tempfile::tempdir().unwrap();
+        let mut routing = Routing::open(&data.path().join("sessions.json"));
+        routing.active = Some(route);
+        let log = RequestLog::new(&Method::POST, "/v1/messages");
+        let messages = json!([{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "fixture"}}
+        ]}]);
+        let mut request = json!({"model": long_id, "messages": messages, "output_config": {"effort": "medium"}});
+        let selection = routing.route(&mut request, true, &log).ok().unwrap();
+        assert_eq!(selection.model, "glm-5.4");
+        assert!(selection.route.effort(&selection.model).unwrap().adapt(&mut request));
+        assert_eq!(request["output_config"]["effort"], "high");
+        assert_eq!(request["messages"], messages);
     }
 
     #[test]

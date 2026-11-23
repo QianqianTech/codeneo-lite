@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.1.19
+
+- 发布 Windows、macOS 和 Ubuntu 安装包，包含 GLM-5.4 接入和 GPT-6.2 用量估算更新。
+
+## 0.1.18
+
+- 智谱 GLM 预设新增 GLM-5.4，可复用 Coding Plan 账号接入 Claude Desktop、Claude Code 和 Codex 桌面端与 CLI，支持 1M 上下文和 Low、High、Max 思考强度。用量页显示套餐计费并统计 Token。
+- 补齐 GPT-6.2 Sol 和 GPT-6.2 Astra 的 Standard API 参考价，覆盖输入、输出、缓存读取、缓存写入及超过 272K 输入的长上下文档位。
+- 更新 OpenAI 预置模型和价格核对日期；回归测试及安装包自检覆盖两个新模型，计价说明明确标准档估算范围。
+
 ## 0.1.17
 
 - Claude Desktop 的旧会话待接续时不再返回登录错误；客户端页直接显示接续入口，历史仍需用户确认后才会发送给当前服务商。

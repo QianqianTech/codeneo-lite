@@ -89,6 +89,8 @@ impl Account {
             ("kimi" | "kimi-pro", Protocol::ChatCompletions | Protocol::Responses) => {
                 Some(KIMI_OPENAI_BASE)
             }
+            ("glm", Protocol::Responses) => Some(GLM_RESPONSES_BASE),
+            ("glm", Protocol::ChatCompletions) => Some(GLM_CHAT_BASE),
             ("qwen-openai", Protocol::Anthropic) => {
                 preset_by_id("qwen").map(|preset| preset.base_url)
             }
@@ -426,6 +428,8 @@ const ALL_PROTOCOLS: &[Protocol] = &[
 const OPENAI_PROTOCOLS: &[Protocol] = &[Protocol::Responses, Protocol::ChatCompletions];
 const DEEPSEEK_OPENAI_BASE: &str = "https://api.deepseek.com";
 const KIMI_OPENAI_BASE: &str = "https://api.kimi.com/coding/v1";
+const GLM_RESPONSES_BASE: &str = "https://open.bigmodel.cn/api/v1";
+const GLM_CHAT_BASE: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
 const QWEN_OPENAI_BASE: &str = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
 const BAILIAN_OPENAI_BASE: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 pub(crate) const QWEN4_MAX: &str = "qwen4-max";
@@ -438,7 +442,7 @@ fn preset_protocols(id: &str) -> Option<&'static [Protocol]> {
 }
 
 fn provider_supports_same_key(id: &str) -> bool {
-    matches!(provider_id(id), "deepseek" | "kimi" | "qwen" | "openrouter" | "bailian")
+    matches!(provider_id(id), "deepseek" | "kimi" | "glm" | "qwen" | "openrouter" | "bailian")
 }
 
 pub fn provider_id(preset: &str) -> &str {
@@ -485,7 +489,7 @@ fn preset(id: &str) -> Option<Preset> {
     let provider = provider_id(id);
     let models: &[&str] = match id {
         "bailian" => &[QWEN4_MAX],
-        "glm" => &["glm-5.3", "glm-5.3-flash"],
+        "glm" => &[http::GLM_5_4, "glm-5.3", "glm-5.3-flash"],
         _ => match provider {
             "deepseek" => &["deepseek-flash", "deepseek-v4-pro"],
             "kimi" => &[
@@ -528,6 +532,8 @@ fn preset(id: &str) -> Option<Preset> {
                 "z-ai/glm-5.3",
             ],
             "openai" => &[
+                "gpt-6.2-astra",
+                "gpt-6.2-sol",
                 "gpt-6-astra",
                 "gpt-6.1-sol",
                 "gpt-6.1-terra",
@@ -1272,6 +1278,11 @@ async fn test_openai(
         // Token Plan can time out on non-streaming Responses requests.
         body["stream"] = json!(true);
         body["reasoning"] = json!({"effort": "none"});
+    } else if reqwest::Url::parse(account.base_for(protocol))
+        .is_ok_and(|base| crate::model_effort::is_glm54_responses(&base, model))
+    {
+        body["reasoning"] = json!({"effort": "low"});
+        body["max_output_tokens"] = json!(256);
     }
     let start = Instant::now();
     let result = transport
@@ -1382,6 +1393,14 @@ pub fn code_model(model: &Model, account: &Account) -> String {
 fn resolved_code_model(model: &str, account: &Account) -> String {
     if model.ends_with("[1m]") {
         return model.to_owned();
+    }
+    // Saved GLM-5.3 profiles used the long context before the default moved to 5.4.
+    if (account.preset == "glm" && model == "glm-5.3")
+        || (model.eq_ignore_ascii_case(http::GLM_5_4)
+            && http::provider_base(account.base_for(Protocol::Anthropic))
+                .is_ok_and(|base| http::is_glm_endpoint(&base, "/api/anthropic")))
+    {
+        return format!("{model}[1m]");
     }
     if let Some(preset) = preset_by_id(provider_id(&account.preset)) {
         for id in [
@@ -1723,6 +1742,21 @@ mod tests {
                 "kimi",
                 Some(Client::Codex),
                 "https://api.kimi.com/coding/v1/models",
+            ),
+            (
+                "glm",
+                Some(Client::Desktop),
+                "https://open.bigmodel.cn/api/anthropic/v1/models",
+            ),
+            (
+                "glm",
+                Some(Client::Codex),
+                "https://open.bigmodel.cn/api/v1/models",
+            ),
+            (
+                "glm",
+                Some(Client::Workbuddy),
+                "https://open.bigmodel.cn/api/coding/paas/v4/models",
             ),
             (
                 "deepseek-openai",

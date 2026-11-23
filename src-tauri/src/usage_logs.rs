@@ -312,6 +312,36 @@ mod tests {
     }
 
     #[test]
+    fn codex_gpt_62_usage_keeps_both_models_priced_after_switching() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let lines = ["gpt-6.2-sol", "gpt-6.2-astra"].into_iter().flat_map(|model| [
+            json!({"type":"turn_context", "payload":{"model":model}}).to_string(),
+            json!({"type":"token_usage_record", "payload":{
+                "response_id":format!("{model}-response"),
+                "usage":{"input_tokens":1000,"cached_input_tokens":500,
+                    "cache_write_input_tokens":100,"output_tokens":200}
+            }}).to_string(),
+        ]).collect::<Vec<_>>().join("\n");
+        std::fs::write(file.path(), &lines).unwrap();
+        let parsed = codex(file.path(), lines.len() as u64);
+        assert!(parsed.read.complete);
+        assert_eq!(parsed.usage.len(), 2);
+        let mut rows = std::collections::BTreeMap::new();
+        for record in parsed.usage {
+            super::super::add(&mut rows, crate::transaction::Client::Codex,
+                &record.model, record.tokens);
+        }
+        for (model, usd) in [("gpt-6.2-sol", 0.0031), ("gpt-6.2-astra", 0.0124)] {
+            let row = &rows[&format!("{model}\n")];
+            assert_eq!(row.priced_tokens, 1200);
+            assert!(row.unpriced.is_empty());
+            let price = row.estimate.unwrap();
+            assert!((price.high_cny - usd * crate::usage_prices::USD_TO_CNY).abs() < 1e-9);
+            assert_eq!(price.source, crate::usage_prices::Source::Openai);
+        }
+    }
+
+    #[test]
     fn oversized_codex_tool_and_compaction_records_do_not_hide_usage() {
         use std::io::Write;
 

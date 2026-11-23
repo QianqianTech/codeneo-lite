@@ -17,6 +17,7 @@ pub(crate) struct Effort {
 #[derive(Clone, Copy)]
 enum Mapping {
     Native,
+    Glm54,
     LowHighMax { xhigh: &'static str },
     HighMax,
     LowMediumHighMax,
@@ -92,6 +93,7 @@ impl Effort {
             return false;
         };
         let mapped = match (self.mapping, effort.as_str()) {
+            (Mapping::Glm54, value) => crate::model_effort::glm54_effort(value).as_str(),
             (Mapping::LowHighMax { .. } | Mapping::HighMax, "medium") => "high",
             (Mapping::LowHighMax { xhigh }, "xhigh") => xhigh,
             (Mapping::HighMax, "low") => "high",
@@ -120,6 +122,9 @@ impl Effort {
             }
             _ => return false,
         };
+        if effort.as_str() == mapped {
+            return false;
+        }
         *effort = mapped.into();
         true
     }
@@ -163,7 +168,7 @@ pub(crate) fn known_levels(base: &Url, model: &str) -> Option<&'static [EffortLe
     use EffortLevel::*;
     let effort = support(base, model)?;
     Some(match effort.mapping {
-        Mapping::LowHighMax { .. } => &[Low, High, Max],
+        Mapping::Glm54 | Mapping::LowHighMax { .. } => &[Low, High, Max],
         Mapping::HighMax => &[High, Max],
         Mapping::LowMediumHighMax => &[Low, Medium, High, Max],
         Mapping::LowMediumXhigh => &[Low, Medium, XHigh],
@@ -215,6 +220,9 @@ fn support(base: &Url, model: &str) -> Option<Effort> {
         };
     }
     match (base.host_str()?, path, model.as_str()) {
+        ("open.bigmodel.cn" | "api.z.ai", "/api/anthropic", model_transport::GLM_5_4) => {
+            Some(Effort::four_levels(Mapping::Glm54))
+        }
         (
             "api.deepseek.com",
             "/anthropic",

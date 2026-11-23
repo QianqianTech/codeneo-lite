@@ -7,7 +7,7 @@ CodeNeo Lite 通过一个界面管理 Claude Desktop、Claude Code、Codex 等�
 在「模型库」选择服务商、填写 API Key、验证并应用，即可为两款桌面客户端分别配置第三方模型，也可以随时切回官方模式。
 
 - **Claude Desktop + Kimi Code / 智谱 GLM Coding Plan**　通过内置预设快速接入兼容 Anthropic Messages 的服务，在 Claude Desktop 的模型菜单中切换模型。
-- **Codex Desktop + Kimi Code / 其他兼容服务**　快速接入支持 OpenAI Responses 的服务。使用直连时，可将同一账号下的多个模型加入 Codex 的原生模型菜单。智谱 GLM Coding Plan 的内置预设用于 Claude Desktop；在 Codex 使用时需另行提供兼容 OpenAI Responses 的接口。
+- **Codex Desktop + Kimi Code / 智谱 GLM Coding Plan / 其他兼容服务**　快速接入支持 OpenAI Responses 的服务。使用直连时，可将同一账号下的多个模型加入 Codex 的原生模型菜单。
 
 ## 下载安装
 
@@ -54,6 +54,8 @@ Claude Desktop 选择新的第三方档案时默认使用「CodeNeo Lite网关�
 3. 拉取列表，勾选需要的模型并一次保存。模型库显示已保存且有关联 Key 的模型。服务商没有目录接口时，可以在添加流程中选择预置模型或手动填写模型 ID。
 4. 按客户端页面的提示应用档案、重开应用或新建会话。从 Claude Desktop 配置时，勾选的多个模型会进入同一个可选模型列表。
 
+使用智谱 GLM-5.4 时，在「模型库」选择「智谱 GLM」，复用已有接入账号或填写 Coding Plan 专属 Key，再选择 `glm-5.4`。Claude Desktop 和 Claude Code 使用 Anthropic Messages，Codex Desktop 和 Codex CLI 使用智谱的 Responses 专用接口。Claude Code 会配置 `glm-5.4[1m]`，Claude Desktop 和 Codex 也会声明 1M 上下文。GLM-5.4 支持图片输入。[智谱模型切换指南](https://docs.bigmodel.cn/cn/coding-plan/latest-model) · [智谱 Codex 接入指南](https://docs.bigmodel.cn/cn/coding-plan/tool/codex)
+
 | 客户端 | 模型接口 | 配置生效 | MCP 连接方式 |
 | --- | --- | --- | --- |
 | Claude Desktop | Anthropic Messages | 网关内热切，初次接入或更改连接方式时重开 | 本地命令、FrameLeap 快捷接入 |
@@ -92,7 +94,7 @@ Claude Desktop、Codex 桌面端和 Codex CLI 已接入 Lite 网关后，在 Lit
 | --- | --- | --- |
 | 百炼 Qwen4-Max | Low、High、Extra | Medium 归到 High，最高档 Extra 对应 `xhigh`。[模型文档](https://help.aliyun.com/zh/model-studio/qwen4-max) |
 | [百炼 Token Plan Qwen4 Max Preview](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)、[百炼 Qwen3.8 Max / Flash](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | Low、Medium、Extra | High 和 Extra 都进入 `xhigh`；最高档为 Extra |
-| [百炼 GLM-5.3](https://help.aliyun.com/zh/model-studio/anthropic-api-messages)、[智谱 GLM-5.3 / Flash](https://docs.bigmodel.cn/cn/coding-plan/latest-model)、[Kimi Code K3.1 Pro / K3 / K2.8 Preview](https://www.kimi.com/code/docs/third-party-tools/claude-code.html)、[DeepSeek 官方 Flash / V4 Pro](https://api-docs.deepseek.com/guides/thinking_mode/) | Low、High、Max | Medium 归到 High |
+| [百炼 GLM-5.3](https://help.aliyun.com/zh/model-studio/anthropic-api-messages)、[智谱 GLM-5.4 / 5.3 / 5.3-Flash](https://docs.bigmodel.cn/cn/coding-plan/latest-model)、[Kimi Code K3.1 Pro / K3 / K2.8 Preview](https://www.kimi.com/code/docs/third-party-tools/claude-code.html)、[DeepSeek 官方 Flash / V4 Pro](https://api-docs.deepseek.com/guides/thinking_mode/) | Low、High、Max | Medium 归到 High |
 | [百炼 GLM-5.2、DeepSeek V4 Pro](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | High、Max | Low、Medium 归到 High |
 | [百炼 kimi-k3.1-pro](https://help.aliyun.com/zh/model-studio/anthropic-api-messages) | Low、Medium、High、Max | 四档分别转发 |
 | [Claude 模型](https://platform.claude.com/docs/en/build-with-claude/effort) | 按型号 | 使用 Claude Desktop 的模型档位 |
@@ -147,7 +149,9 @@ FrameLeap 位于「MCP 工具 → 热门 MCP」首位，展开后会选中 Claud
 
 价格表覆盖预置模型，并统一处理已核对的模型别名、供应商前缀和日期后缀。Qwen4-Max 的北京按量价为每百万 Token 输入 10 元、输出 30 元、缓存命中 0.50 元、创建 5 分钟缓存 12.50 元、创建 1 小时缓存 20 元。明确来自 Token Plan 的记录显示「套餐计费」。预览版的两个模型 ID `qwen4-max-preview` 和 `qwen4.0-max-preview` 同样显示「套餐计费」。[百炼价目表](https://help.aliyun.com/zh/model-studio/model-pricing) [Token Plan 计量规则](https://help.aliyun.com/zh/model-studio/token-plan-usage-quota) [预览版说明](https://help.aliyun.com/zh/model-studio/qwen4-max-preview)
 
-GLM-5.3 系列按智谱人民币公开价估算。自动路由或套餐别名未提供实际模型时，显示「实际模型待确认」。未收录的新模型显示「价格待补充」，其 Token 仍纳入总量。[智谱价目表](https://docs.bigmodel.cn/cn/guide/start/pricing)
+GLM-5.3 系列按智谱人民币公开价估算。GLM-5.4 暂无公开按量单价，用量页显示「套餐计费」，Token 仍计入总量。自动路由或套餐别名未提供实际模型时，显示「实际模型待确认」。未收录的新模型显示「价格待补充」。[智谱价目表](https://docs.bigmodel.cn/cn/guide/start/pricing)
+
+OpenAI 使用 Standard 标准档参考价。GPT-6.2 Sol 每百万 Token 的输入、输出、缓存读取、30 分钟缓存写入、12 小时缓存写入分别为 2、10、0.10、2.50、5 美元；GPT-6.2 Astra 分别为 8、40、0.40、10、20 美元。单次请求输入（含缓存）超过 272K 时，该请求的输入及缓存单价翻倍，输出单价乘 1.5。Fast、Ultrafast、Batch 和后台任务折扣不在当前参考估算中。[OpenAI 价目表](https://developers.openai.com/api/docs/pricing)
 
 存在未折算记录时，金额显示「已估算小计」及已覆盖的 Token 比例。同一模型部分请求缺少计价依据时，也会保留原因和未折算用量。价格来源与核对日期由后端统一提供，价格表随应用版本更新，不实时抓取官网。开发时运行 `cargo test --locked -p codeneo-lite usage`，其中的覆盖检查要求每个预置模型及角色映射具有计价规则或明确的套餐／动态路由说明；新增模型不能直接落入未知价格。
 

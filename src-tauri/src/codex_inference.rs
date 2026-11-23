@@ -114,7 +114,8 @@ fn gateway_key(root: &Path, reference: &str) -> Result<String, String> {
 impl Route {
     pub(crate) fn prepare_effort(&self, payload: &mut Value) {
         let qwen4 = model_effort::is_qwen4_responses(&self.endpoint, &self.model);
-        if !qwen4 && self.effort.is_none() && payload["model"].as_str() == Some(self.model.as_str()) {
+        let glm54 = model_effort::is_glm54_responses(&self.endpoint, &self.model);
+        if !qwen4 && !glm54 && self.effort.is_none() && payload["model"].as_str() == Some(self.model.as_str()) {
             return;
         }
         let Some(reasoning) = payload.get_mut("reasoning").and_then(Value::as_object_mut) else {
@@ -124,7 +125,9 @@ impl Route {
             return;
         };
         let level = model_transport::EffortLevel::parse(value);
-        let supported = if qwen4 {
+        let supported = if glm54 {
+            Some(model_effort::glm54_effort(value))
+        } else if qwen4 {
             use model_transport::EffortLevel::*;
             level.map(|level| match level {
                 Minimal => Low,
@@ -135,7 +138,7 @@ impl Route {
         } else {
             level.and_then(|level| self.effort.as_ref()?.nearest(level))
         };
-        if supported == level && supported.is_some() {
+        if supported.is_some_and(|level| level.as_str() == value) {
             return;
         }
         if let Some(supported) = supported {
@@ -286,6 +289,25 @@ impl ReasoningScope {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn glm54_responses_preserves_reasoning_fields_while_mapping_effort_aliases() {
+        let route = Route {
+            endpoint: "https://open.bigmodel.cn/api/v1/responses".parse().unwrap(),
+            model: "glm-5.4".into(),
+            key: String::new(),
+            upstream_key: String::new(),
+            effort: None,
+        };
+        for (requested, expected) in [
+            ("minimal", "low"), ("medium", "high"), ("xhigh", "max"),
+            ("ultra", "max"), ("unknown", "max"), ("max", "max"),
+        ] {
+            let mut request = json!({"model": route.model, "reasoning": {"effort": requested, "summary": "auto"}});
+            route.prepare_effort(&mut request);
+            assert_eq!(request["reasoning"], json!({"effort": expected, "summary": "auto"}));
+        }
+    }
 
     #[test]
     fn qwen4_normalizes_codex_effort_using_the_official_mapping() {

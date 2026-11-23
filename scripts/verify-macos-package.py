@@ -33,5 +33,13 @@ if abs(report.get("glm_5_3_cny", -1) - 0.0146) > 1e-10:
     raise SystemExit(f"GLM 计价验证失败：{report}")
 if abs(report.get("qwen4_max_cny", -1) - 0.0185) > 1e-10:
     raise SystemExit(f"Qwen4-Max 计价验证失败：{report}")
+for model, short_usd, long_usd in (
+    ("gpt-6.2-sol", 0.00405, 1.088004),
+    ("gpt-6.2-astra", 0.0162, 4.352016),
+):
+    prices = report.get("gpt_6_2", {}).get(model, {})
+    if any(abs(prices.get(key, -1) - expected) > 1e-10
+           for key, expected in (("short_usd", short_usd), ("long_usd", long_usd))):
+        raise SystemExit(f"{model} 标准档/长上下文计价验证失败：{report}")
 report.update(app=str(app), architectures=architectures, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
 print(json.dumps(report, ensure_ascii=False, indent=2))
